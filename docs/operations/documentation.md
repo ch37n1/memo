@@ -283,13 +283,13 @@ Example:
 docs/
 ├── README.md                  # Entry point: project overview, docs map, link to this file
 │
-├── overview/                  # Problem space and goals
+├── overview/                  # Problem space and goals (for now not needed, README is ok)
 │   ├── problem.md
 │   ├── goals.md
 │   ├── non-goals.md
 │   └── glossary.md
 │
-├── architecture/              # System-level truth
+├── architecture/              # System-level truth (in this project architecture.md is enougph)
 │   ├── README.md
 │   ├── system-context.md
 │   ├── high-level-design.md

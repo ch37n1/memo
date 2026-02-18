@@ -6,9 +6,48 @@ description: Project documentation entry point — agreements, structure, and na
 
 ## Project Overview
 
-`memo` is a mount-scoped, daemon-based collaborative filesystem layer for safe human–agent knowledge work. See [vision](vision.md) for full details.
+`memo` is a secure, mount-scoped, daemon-backed filesystem layer for collaborative human–agent knowledge work.
 
-!> [!IMPORTANT] Check [Documentation Agreements](operations/documentation.md) on how to work with doc.
+It gives humans and LLM agents a shared, policy-controlled space where both can read, write, and build a common knowledge base — without exposing unrelated personal files. Memory in v1 is **file-based**: regular files and directories accessed through named mounts. Files are the right starting primitive because they are native to human tools (Obsidian, editors) and equally accessible to agents.
+
+### Architecture
+
+| Component | Role |
+|-----------|------|
+| `memod` | Daemon — owns all filesystem I/O; the only process that touches the real filesystem |
+| `memo` | CLI client — for humans and agents |
+| `memo-ui` | Tauri v2 native macOS desktop app — mount/token management and audit log viewer |
+| `memo-client` | Shared Rust library — typed HTTP client used by CLI and UI backend |
+
+All IPC is REST HTTP/1.1 on loopback TCP (`127.0.0.1:18301`). No external network exposure.
+
+**Primary platform:** macOS. Linux is a supported secondary target. Windows is out of scope.
+**Implementation language:** Rust across the entire stack.
+
+### Development Stage
+
+MVP — single-user personal tool. One human operator, one or more LLM agents, all on the same machine. No multi-user, no networked access.
+
+### Goals (v1)
+
+- Safe, policy-enforced access to named filesystem mounts
+- No out-of-bounds path access (traversal, symlinks, absolute paths)
+- Collaborative Markdown knowledge base accessible to both humans (Obsidian) and agents
+- Atomic writes compatible with file watchers (Obsidian, etc.)
+- Token-based auth with per-mount, per-operation scopes
+- Structured, deterministic output suitable for LLM agent consumption
+- Audit log of all operations
+
+### Non-Goals (v1)
+
+- Embeddings or semantic search
+- Graph/object memory layer
+- Exposure beyond loopback (TLS, external TCP)
+- Multi-user or multi-machine scenarios
+- Shell execution or virtual filesystem views
+- Windows support
+
+> [!IMPORTANT] Check [Documentation Agreements](operations/documentation.md) on how to work with docs.
 
 ---
 
@@ -58,13 +97,13 @@ _In future, some agreements can be moved to `operations` if grow to much._
 | Directory | Purpose | Truth type |
 |-----------|---------|------------|
 | `docs/README.md` | Entry point: project overview, docs map | — |
-| `overview/` | Problem space, goals, non-goals, glossary | Vision truth |
 | `architecture/` | System context, high-level design, data flow, deployment | System truth |
 | `design/` | Per bounded context: responsibilities, flows, decisions (closer to implementation) | Domain truth |
 | `decision-records/` | Numbered records of significant choices with status tracking | Historical truth |
 | `development/` | Local setup, coding guidelines, testing strategy | Procedural truth |
 | `operations/` | Configuration, monitoring, documentation agreements | Operational truth |
 | `references/` | API specs, data model, external links | Lookup material |
+| `archive/` | Deprecated or superseded documents no longer actively maintained | Historical truth |
 
 > Full conventions: [Documentation Agreements](operations/documentation.md)
 
