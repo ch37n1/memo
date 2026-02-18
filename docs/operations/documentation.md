@@ -289,7 +289,7 @@ docs/
 │   ├── non-goals.md
 │   └── glossary.md
 │
-├── architecture/              # System-level truth (in this project architecture.md is enougph)
+├── architecture/              # System-level truth (in this project architecture.md is enough)
 │   ├── README.md
 │   ├── system-context.md
 │   ├── high-level-design.md
