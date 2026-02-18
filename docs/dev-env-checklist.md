@@ -21,6 +21,7 @@
         - check if there is skill avaliable for task
         - if not ready on local, then search with `Find Skills` skill
         - if not found then do not use skill and do by yourself
+        - run all linters & formatters
         - recheck all change with review agent
         - tests step (add & check)
         - documentation update step (check if doc need to be updated and do so if need)

@@ -10,18 +10,19 @@ It follows a client–server model with three binaries:
 
 - **`memod`** — daemon process; owns all filesystem I/O; the only process that touches the real filesystem
 - **`memo`** — CLI client for humans and agents
-- **`memo-ui`** — Tauri-based native macOS admin application for managing mounts, tokens, and audit log; not a general file editor
+- **`memo-ui`** — Tauri v2 native macOS desktop application for managing mounts, tokens, and audit log; not a general file editor
+- **`memo-client`** — shared Rust library crate; typed REST HTTP client (`reqwest`-based), used by both `memo` CLI and `memo-ui` backend
 
 **Primary platform: macOS.** Linux is a supported secondary target. Windows is out of scope.
 
-All IPC is over a Unix domain socket. No network exposure. No shell execution. No virtual filesystem.
+All IPC is over **REST HTTP/1.1 on loopback TCP (`127.0.0.1:18301`)**. The daemon binds to localhost only — no external network exposure. No shell execution. No virtual filesystem.
 
 **Implementation language: Rust** across the entire stack. Rationale:
 
 - Memory safety without GC — critical for a daemon doing path manipulation
 - Single static binary output for `memod` and `memo`
 - Tauri requires Rust for the backend; using Rust everywhere means one toolchain (Cargo workspace)
-- Strong ecosystem for async HTTP (`axum`/`hyper`), SQLite (`rusqlite`/`sqlx`), and path handling
+- Strong ecosystem for async HTTP (`axum`/`hyper`), SQLite (`sqlx`), and path handling
 
 ---
 
@@ -49,7 +50,7 @@ One human operator. One or more LLM agents. All on the same machine. No multi-us
 
 - Embeddings or semantic search
 - Graph/object memory layer
-- Network exposure (HTTP over TCP, TLS, etc.)
+- Exposure beyond loopback (TLS, external TCP, internet-facing)
 - Multi-user or multi-machine scenarios
 - Shell execution
 - Virtual filesystem views
@@ -107,11 +108,11 @@ One human operator. One or more LLM agents. All on the same machine. No multi-us
 │  └────┬─────┘    └─────┬──────┘    └──────────┬───────────┘    │
 │       │                │                       │                │
 │       └────────────────┴───────────────────────┘                │
-│                        │  HTTP/1.1 + JSON                       │
-│                        │  Unix domain socket                    │
+│                        │  REST HTTP/1.1 + JSON                  │
+│                        │  127.0.0.1:18301                       │
 │              ┌─────────▼──────────┐                            │
 │              │       memod        │                            │
-│              │   (axum/hyper)     │                            │
+│              │   (axum/tokio)     │                            │
 │              │                   │                            │
 │              │  ┌─────────────┐  │                            │
 │              │  │  auth layer │  │                            │
@@ -136,10 +137,7 @@ One human operator. One or more LLM agents. All on the same machine. No multi-us
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Socket path resolution (in order):**
-
-1. `$XDG_RUNTIME_DIR/memo/memod.sock`
-2. `~/.local/run/memo/memod.sock`
+**Default bind address:** `127.0.0.1:18301` (loopback only; configurable via `daemon.bind_addr` in config)
 
 **Config file:** `~/.config/memo/config.toml`
 
@@ -151,15 +149,18 @@ One human operator. One or more LLM agents. All on the same machine. No multi-us
 
 ### 7.1 memod (Daemon)
 
-Single async binary built on `tokio` + `axum`. Listens on a Unix domain socket. All filesystem I/O runs inside this process.
+Single async binary built on `tokio` + `axum`. Listens on TCP loopback (`127.0.0.1:18301` by default). All filesystem I/O runs inside this process.
 
 **Startup sequence:**
 
 1. Load `~/.config/memo/config.toml`
-2. Create socket directory and acquire socket lock (PID file at `$XDG_RUNTIME_DIR/memo/memod.pid`)
-3. Open SQLite database (WAL mode, apply migrations)
-4. Bind `axum` server to Unix socket
-5. Register signal handlers: `SIGTERM`/`SIGINT` for graceful shutdown
+2. Open log file at `$XDG_STATE_HOME/memo/memod.log` (default: `~/.local/state/memo/memod.log`) for appending
+3. Write PID file to `$XDG_RUNTIME_DIR/memo/memod.pid` (used by `memo daemon status/stop`)
+4. Open SQLite database (WAL mode, apply migrations)
+5. If no tokens exist in DB: generate bootstrap admin token with all scopes, write raw token to `~/.config/memo/bootstrap.token` (mode `0600`), print file path to stderr. **Daemon continues running — it does not halt.**
+6. Bind `axum` server to `127.0.0.1:18301` (or configured `bind_addr`)
+7. Register signal handlers: `SIGTERM`/`SIGINT` for graceful shutdown
+8. Spawn background task: prune `audit_log` if row count exceeds `max_audit_log_rows` (non-blocking — daemon is already serving by this point)
 
 **Internal modules:**
 
@@ -170,16 +171,17 @@ memod/src/
 ├── fs/
 │   ├── mod.rs       # FsService: core dispatch
 │   ├── ops.rs       # ls, stat, read, write, mkdir, mv, rm, cp
-│   ├── grep.rs      # text search implementation
-│   ├── find.rs      # glob search implementation
-│   └── atomic.rs    # atomic write-by-rename
+│   ├── grep.rs      # text search (regex crate)
+│   ├── find.rs      # glob search (walkdir + globset)
+│   └── atomic.rs    # atomic write-by-rename (streaming AsyncRead, temp-file cleanup on error)
 ├── policy/
-│   ├── mod.rs       # PolicyEngine: path validation + glob matching
-│   └── path.rs      # canonical path resolution, out-of-bounds check
+│   ├── mod.rs       # PolicyEngine; glob cache: DashMap<String, Arc<CompiledMount>>
+│   │                #   invalidated on mount create/update/delete
+│   └── path.rs      # resolve_read_path / resolve_write_path; path-clean normalization
 ├── db/
-│   ├── mod.rs       # DB pool, migration runner
-│   ├── mounts.rs    # mount CRUD
-│   ├── tokens.rs    # token CRUD, hash verification
+│   ├── mod.rs       # sqlx pool (SQLite WAL), migration runner
+│   ├── mounts.rs    # mount CRUD (invalidates glob cache on write)
+│   ├── tokens.rs    # token CRUD; Argon2 verify via spawn_blocking
 │   └── audit.rs     # audit log insertion
 └── auth/
     └── mod.rs       # token extraction, scope verification
@@ -205,20 +207,31 @@ Incoming request
 
 **Atomic write implementation:**
 
+Accepts an `AsyncRead` source to support streaming without full in-memory buffering (satisfies NFR-05). On any error, the temp file is cleaned up before returning.
+
 ```rust
 // atomic.rs
-pub async fn atomic_write(target: &Path, content: &[u8], fsync: bool) -> Result<()> {
+pub async fn atomic_write<R>(target: &Path, mut reader: R, fsync: bool) -> Result<u64>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     let dir = target.parent().ok_or(Error::InvalidPath)?;
-    let tmp = dir.join(format!(".memo_tmp_{}", random_hex(8)));
-    let mut file = fs::File::create(&tmp).await?;
-    file.write_all(content).await?;
-    if fsync {
-        file.sync_all().await?;
+    let tmp = dir.join(format!(".memo_tmp_{}", uuid::Uuid::new_v4().simple()));
+    let result = async {
+        let mut file = fs::File::create(&tmp).await?;
+        let written = tokio::io::copy(&mut reader, &mut file).await?;
+        if fsync {
+            file.sync_all().await?;
+        }
+        drop(file);
+        fs::rename(&tmp, target).await?;
+        Ok(written)
     }
-    drop(file);
-    fs::rename(&tmp, target).await?;
-    // optionally sync parent dir
-    Ok(())
+    .await;
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp).await; // best-effort cleanup
+    }
+    result
 }
 ```
 
@@ -226,15 +239,14 @@ pub async fn atomic_write(target: &Path, content: &[u8], fsync: bool) -> Result<
 
 ### 7.2 memo (CLI)
 
-Thin client binary. Reads token from environment variable or OS keychain. Sends HTTP requests to the daemon over the Unix socket using `hyper` with a custom `UnixConnector`.
+Thin client binary. Reads token from environment variable or config file. Sends REST HTTP/1.1 requests to the daemon via the shared `memo-client` crate, which uses `reqwest` with base URL `http://127.0.0.1:18301`.
 
 **Command dispatch:**
 
 ```
 memo/src/
-├── main.rs          # clap app, global flags (--json, --socket, --token)
-├── client.rs        # HTTP client over Unix socket
-└── commands/
+├── main.rs          # clap app, global flags (--json, --host, --port, --token)
+└── commands/        # all commands use memo-client crate for HTTP transport
     ├── ls.rs
     ├── tree.rs
     ├── cat.rs
@@ -242,11 +254,11 @@ memo/src/
     ├── mkdir.rs
     ├── mv.rs
     ├── rm.rs
-    ├── cp.rs
+    ├── cp.rs        # local→mount: reads local file, calls write endpoint and also for mount→mount
     ├── grep.rs
     ├── find.rs
     ├── info.rs
-    ├── mount.rs     # mount management (add, remove, list)
+    ├── mount.rs     # mount management (add, remove, list, update)
     └── token.rs     # token management (create, revoke, list)
 ```
 
@@ -254,50 +266,92 @@ memo/src/
 
 1. `--token` flag
 2. `MEMO_TOKEN` environment variable
-3. macOS Keychain (service: `memo`, account: mount name) — v1 best-effort
-4. `~/.config/memo/tokens/<name>.token` (mode `0600`)
+3. `~/.config/memo/tokens/<name>.token` (mode `0600`)
+4. macOS Keychain (service: `memo`, account: mount name) — deferred to v2
+
+**Host/port resolution order (CLI):**
+
+1. `--host` / `--port` flags
+2. `MEMO_HOST` / `MEMO_PORT` environment variables
+3. `[daemon] bind_addr` in `~/.config/memo/config.toml`
+4. Default: `127.0.0.1:18301`
 
 **Global flags:**
 
 ```
 --json              Emit JSON output
---socket <path>     Override socket path
+--host <addr>       Override daemon host (default: 127.0.0.1)
+--port <port>       Override daemon port (default: 18301)
 --token <token>     Override token
 --mount <name>      Default mount (reduces repetition)
 ```
 
-### 7.3 memo-ui (Tauri Admin UI)
+### 7.3 memo-ui (Tauri v2 Desktop Admin UI)
 
-Tauri application where the Rust backend connects to `memod` via the Unix socket (same `hyper` + `UnixConnector` approach as the CLI). The frontend (web) communicates with the Tauri backend via Tauri commands.
+**Tauri v2** native macOS desktop application. The Rust backend (`src-tauri`) connects to `memod` via REST HTTP using the shared `memo-client` crate (`reqwest`-based). The frontend (HTML/CSS/JS rendered in the webview) communicates with the Rust backend via Tauri v2 `invoke` commands.
 
 **Scope in v1:** Mount management, token management, audit log viewer, basic file browser. Not a full editor — Obsidian handles editing for shared mounts.
+
+**Admin token setup:** On first launch, `memo-ui` shows a setup screen prompting the user to paste their admin token (obtained from `~/.config/memo/bootstrap.token`). The token is stored via `tauri-plugin-store` in the macOS app data directory (sandboxed). All subsequent launches read the token from the store.
+
+**macOS app bundle identifier:** `io.github.memo`
+
+**Content Security Policy** (`tauri.conf.json`):
+
+```json
+"app": {
+  "security": {
+    "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'"
+  }
+}
+```
 
 **Directory layout:**
 
 ```
 memo-ui/
 ├── src-tauri/
+│   ├── capabilities/
+│   │   └── default.json  # Tauri v2 capability declarations (required)
 │   ├── src/
 │   │   ├── main.rs
-│   │   └── commands.rs   # Tauri commands wrapping memod HTTP calls
-│   └── Cargo.toml
+│   │   ├── lib.rs        # shared lib entry point (required for Tauri v2)
+│   │   └── commands.rs   # Tauri invoke commands using memo-client
+│   └── Cargo.toml        # crate-type = ["staticlib", "cdylib", "rlib"]
 └── src/                  # web frontend (HTML/CSS/JS or framework)
+    ├── index.html
+    ├── app.js
+    └── style.css
 ```
 
-The UI connects to `memod` using the same token mechanism as the CLI. Admin operations (mount registration, token creation) require tokens with `admin:*` scopes.
+**`capabilities/default.json` (minimum):**
+
+```json
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
+```
+
+Admin operations (mount registration, token creation) require tokens with `admin:*` scopes.
 
 ---
 
 ## 8. IPC Protocol
 
-**Transport:** HTTP/1.1 over Unix domain socket.
+**Transport:** REST HTTP/1.1 over TCP loopback.
 
-**Why HTTP over Unix socket:**
+**Base URL:** `http://127.0.0.1:18301`
 
-- Debuggable with `curl --unix-socket /path/to/memod.sock http://localhost/v1/fs/ls?path=VaultKB:/`
-- Well-supported by `axum`/`hyper` natively
-- Standard request/response semantics; streaming via chunked transfer encoding
-- No custom framing protocol to maintain
+**Why REST over TCP loopback:**
+
+- Debuggable with plain `curl` — no special flags, no custom transport
+- `reqwest` in `memo-client` replaces the complex `hyper + UnixConnector` — much simpler client code
+- LLM agents can call the API directly as standard HTTP — no special client library required
+- `axum` with `TcpListener` is trivial; same router and handlers as any other axum server
+- Loopback bind (`127.0.0.1`) means no external network surface; Bearer token auth provides the access control layer
 
 **Content-Type:** `application/json` for all request and response bodies except raw file reads/writes.
 
@@ -307,32 +361,44 @@ The UI connects to `memod` using the same token mechanism as the CLI. Admin oper
 
 **Auth header:** `Authorization: Bearer <token>` on every request.
 
-**Socket path:**
+**Address resolution (in order):**
 
 ```
-Priority 1: $XDG_RUNTIME_DIR/memo/memod.sock
-Priority 2: ~/.local/run/memo/memod.sock
-Override:   MEMO_SOCKET env var or --socket flag
+Priority 1: MEMO_HOST / MEMO_PORT environment variables
+Priority 2: ~/.config/memo/config.toml [daemon] bind_addr
+Default:    127.0.0.1:18301
+Override:   --host / --port CLI flags
 ```
 
 **Example curl debug session:**
 
 ```bash
-export SOCK=/run/user/1000/memo/memod.sock
+export BASE=http://127.0.0.1:18301
 export TOK=memo_abc123...
 
 # list mount root
-curl --unix-socket $SOCK \
-  -H "Authorization: Bearer $TOK" \
-  "http://localhost/v1/fs/ls?path=VaultKB:/"
+curl -H "Authorization: Bearer $TOK" \
+  "$BASE/v1/fs/ls?path=VaultKB:/"
 
 # write a file
-curl --unix-socket $SOCK \
-  -X PUT \
+curl -X PUT \
   -H "Authorization: Bearer $TOK" \
   --data-binary @notes.md \
-  "http://localhost/v1/fs/write?path=VaultKB:/notes/git.md"
+  "$BASE/v1/fs/write?path=VaultKB:/notes/git.md"
+
+# health check (no auth)
+curl "$BASE/health"
 ```
+
+**Future: WebSocket (`/v1/ws`)**
+
+Not in v1 scope, but the REST-over-TCP foundation makes WebSocket a natural addition. Planned use cases:
+
+- **Live audit log tail** — push new `audit_log` rows to connected clients as they arrive, replacing polling `GET /v1/meta/audit`
+- **File-change events** — push `fs::watch` notifications when files in mounted directories change (useful for agent awareness of human edits)
+- **Streaming grep** — push grep matches incrementally as the search progresses over large trees
+
+`axum` supports WebSocket natively via `axum::extract::ws`. The same Bearer token auth applies on the upgrade handshake.
 
 ---
 
@@ -347,22 +413,46 @@ Path validation is the most security-critical component. It runs before any file
 3. **Reject absolute paths** — relative path must not start with `/` after the colon.
 4. **Reject `..` components** — split by `/`, reject any component equal to `..` or `.`.
 5. **Join with mount root** — `mount.root_path.join(relative_path)`.
-6. **Canonicalize** — call `std::fs::canonicalize` (or `tokio::fs::canonicalize`) to resolve the real path. **This call happens after the logical checks.**
+6. **Canonicalize** — for **read operations** (path must already exist): call `tokio::fs::canonicalize` on the full joined path. For **write operations** (target may not yet exist — `canonicalize` would fail on a new file): call `tokio::fs::canonicalize` on the *parent* directory only, then re-append the filename. **This call happens after the logical checks.**
 7. **Verify prefix** — assert that `canonical_path.starts_with(&mount.root_path_canonical)`. If not: `out_of_bounds` error.
-8. **Check symlink** — after canonicalization, verify the original `join` result matches canonical. If they differ, a symlink was traversed: reject.
+8. **Check symlink** — normalize the joined path with `path_clean::clean` (collapses `.` components without a syscall) before comparing to the canonical result. If they differ, a symlink was traversed: reject. Direct `joined != canonical` comparison produces false positives.
 9. **Apply policy globs** — check hide, deny-read, deny-write globs against the relative path component.
 10. **Check size limits** — for reads: stat file, compare against `max_read_bytes`. For writes: check `Content-Length` or streamed byte count against `max_write_bytes`.
 
 **Symlink detection detail:**
 
+`mount_root.join(&relative)` produces a non-normalized path (e.g. `/vault/notes/./git.md`). Comparing it directly to the canonicalized result produces false positives. Normalize with `path_clean::clean` before comparing.
+
+For **read operations** (path must already exist):
+
 ```rust
-let joined = mount_root.join(&relative);           // logical path
+let joined = mount_root.join(&relative);
+let normalized = path_clean::clean(&joined);       // collapse `.` without syscall
 let canonical = tokio::fs::canonicalize(&joined).await?;
 let root_canonical = tokio::fs::canonicalize(&mount_root).await?;
 
-// Symlink check: if the joined path != canonical, something was resolved
-// We re-check each path component to detect symlinks
-if joined != canonical {
+if normalized != canonical {
+    return Err(PolicyError::SymlinkDenied);
+}
+if !canonical.starts_with(&root_canonical) {
+    return Err(PolicyError::OutOfBounds);
+}
+```
+
+For **write operations** (target may not yet exist — `canonicalize` fails on new files):
+
+```rust
+let joined = mount_root.join(&relative);
+let parent = joined.parent().ok_or(PolicyError::InvalidPath)?;
+let filename = joined.file_name().ok_or(PolicyError::InvalidPath)?;
+
+let canonical_parent = tokio::fs::canonicalize(parent).await
+    .map_err(|_| PolicyError::NotFound)?;
+let canonical = canonical_parent.join(filename);
+
+// Symlink check on parent
+let normalized_parent = path_clean::clean(parent);
+if normalized_parent != canonical_parent {
     return Err(PolicyError::SymlinkDenied);
 }
 if !canonical.starts_with(&root_canonical) {
@@ -440,7 +530,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 
 ## 11. API Reference
 
-Base URL (over Unix socket): `http://localhost`
+Base URL: `http://127.0.0.1:18301`
 
 All requests require `Authorization: Bearer <token>`.
 
@@ -480,7 +570,7 @@ Recursive directory tree.
 | Param | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `path` | yes | — | `MountName:/relative/path` |
-| `depth` | no | `3` | Max recursion depth |
+| `depth` | no | `3` | Max recursion depth (server-side maximum: `10`; requests above this are clamped) |
 
 **Response `200`:**
 
@@ -488,6 +578,7 @@ Recursive directory tree.
 {
   "path": "VaultKB:/",
   "depth": 3,
+  "truncated": false,
   "tree": {
     "name": "",
     "kind": "dir",
@@ -503,6 +594,8 @@ Recursive directory tree.
   }
 }
 ```
+
+**Server-side limits:** `depth` is clamped to a maximum of `10`. Total entries returned across all levels is capped at `10 000`; if the cap is reached, `"truncated": true` is set in the response.
 
 ---
 
@@ -599,7 +692,7 @@ Delete file or empty directory. Add `?recursive=true` to delete non-empty direct
 
 #### `POST /v1/fs/cp`
 
-Copy file. `src` and `dst` may be within different mounts (if token has scope for both).
+Copy file between mounts. Both `src` and `dst` must be memo mount paths. Token must have read scope on the source mount and write scope on the destination mount. Policy (deny globs, size limits) is checked on both mounts independently.
 
 **Query params:** `src`, `dst`
 
@@ -608,6 +701,8 @@ Copy file. `src` and `dst` may be within different mounts (if token has scope fo
 ```json
 {"src": "VaultKB:/notes/a.md", "dst": "VaultKB:/archive/a.md"}
 ```
+
+**Local → mount copies:** The daemon `cp` endpoint only operates on mount paths. To copy a local file into a mount, the `memo` CLI reads the local file and calls `PUT /v1/fs/write`. The CLI's `memo cp ./local.png VaultKB:/assets/image.png` handles this transparently — no special daemon endpoint is required.
 
 ---
 
@@ -736,6 +831,30 @@ Remove mount registration. Does not delete files.
 
 ---
 
+#### `PATCH /v1/meta/mounts/:name`
+
+Update mount policy fields. Only provided fields are changed; omitted fields retain their current values.
+
+**Body (all fields optional):**
+
+```json
+{
+  "mode": "ro",
+  "description": "Now read-only",
+  "hide_globs": [".obsidian/**", "*.private.md"],
+  "deny_read_globs": [],
+  "deny_write_globs": ["*.png"],
+  "max_read_bytes": null,
+  "max_write_bytes": 5242880
+}
+```
+
+**Response `200`:** Full updated mount object.
+
+**Note:** `name` and `root_path` are immutable after registration. Remove and re-add the mount to change them.
+
+---
+
 #### `GET /v1/meta/tokens`
 
 **Response `200`:**
@@ -844,6 +963,8 @@ Raw tokens use the format `memo_<random_base62_32chars>`. This prefix aids ident
 
 Tokens are hashed with Argon2id before storage. Parameters: `m=19456` (19 MiB), `t=2`, `p=1` (OWASP recommended minimum).
 
+**Verification** is CPU-intensive (~50–100ms at these parameters). All `argon2::verify_encoded` calls are dispatched via `tokio::task::spawn_blocking` to avoid blocking the async runtime thread pool.
+
 ```sql
 -- tokens table: hash column stores argon2id PHC string
 hash TEXT NOT NULL   -- e.g. "$argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>"
@@ -870,16 +991,30 @@ Scopes are strings of the form `<namespace>:<resource>:<action>`:
 
 ### Token Storage (Client Side)
 
-- **Human (CLI):** macOS Keychain via `security` CLI (v1 best-effort); fallback to `~/.config/memo/tokens/<name>.token` at mode `0600`.
+- **Human (CLI):** `~/.config/memo/tokens/<name>.token` (mode `0600`). macOS Keychain integration deferred to v2.
 - **Agent:** `MEMO_TOKEN` environment variable. Fallback to file.
 
 ### Bootstrap
 
-The first time `memod` is initialized with no tokens in the database, it generates an `admin` token with all scopes, prints it once to stdout, and halts. The operator stores this token and uses it to provision further tokens.
+The first time `memod` starts with no tokens in the database, it generates an `admin` token with all scopes and:
+
+1. Writes the raw token to `~/.config/memo/bootstrap.token` (mode `0600`).
+2. Prints the file path to stderr: `Bootstrap token written to: ~/.config/memo/bootstrap.token`.
+3. **Continues running normally** — does not halt. The daemon is immediately ready to serve requests using the bootstrap token.
+
+The operator reads the file, stores the token securely, and uses it to provision further tokens. After provisioning, `~/.config/memo/bootstrap.token` should be deleted.
 
 ---
 
 ## 13. Error Model
+
+**Error type implementation** uses `thiserror`. `memo-core` defines:
+
+- `ApiError` — top-level HTTP error returned to clients; implements `axum::response::IntoResponse`
+- `PolicyError` — path validation errors, mapped to `ApiError` in `server.rs`
+- `DbError` — database errors, wrapped into `ApiError::Internal`
+
+Each layer converts its domain error to the next via `From` implementations.
 
 All error responses have HTTP status ≥ 400 and body:
 
@@ -946,7 +1081,8 @@ Global flags apply to all commands:
 
 ```
 --json              Structured JSON output
---socket <path>     Unix socket path (overrides env/config)
+--host <addr>       Daemon host (overrides env/config, default: 127.0.0.1)
+--port <port>       Daemon port (overrides env/config, default: 18301)
 --token <token>     Auth token (overrides env/config)
 ```
 
@@ -1070,16 +1206,17 @@ Mounts are stored in SQLite (not in config files). Registration happens via `mem
 
 ```toml
 [daemon]
-socket_path = ""          # empty = use XDG_RUNTIME_DIR default
-db_path = ""              # empty = use XDG_DATA_HOME default
-log_level = "info"        # trace | debug | info | warn | error
+bind_addr = "127.0.0.1:18301"  # TCP address to listen on; change port if 18301 conflicts
+db_path = ""                    # empty = use XDG_DATA_HOME default (~/.local/share/memo/memo.db)
+log_path = ""                   # empty = use XDG_STATE_HOME default (~/.local/state/memo/memod.log)
+log_level = "info"              # trace | debug | info | warn | error
 
 [daemon.write]
 fsync = false             # enable fsync before rename (safer, slower)
 dir_sync = false          # sync parent directory after rename
 
 [daemon.limits]
-max_audit_log_rows = 100000   # rows before oldest are pruned
+max_audit_log_rows = 100000   # rows before oldest are pruned (pruning runs as background task on startup)
 ```
 
 ---
@@ -1094,7 +1231,7 @@ The audit log is queryable via `GET /v1/meta/audit` and `memo audit` (future CLI
 
 ### Structured Logging (memod)
 
-`memod` uses `tracing` + `tracing-subscriber` with configurable log level. Output: JSON lines to stderr (suitable for `systemd` or log aggregation) or human-readable for development.
+`memod` uses `tracing` + `tracing-subscriber` with configurable log level. Log output is written to **`$XDG_STATE_HOME/memo/memod.log`** (default: `~/.local/state/memo/memod.log`) in JSON-lines format, and also mirrored to stderr. The `memo daemon logs --tail N` CLI command reads the log file directly (no DB involvement).
 
 Format (JSON):
 
@@ -1134,16 +1271,16 @@ memo/
 │   │       ├── fs/
 │   │       │   ├── mod.rs  # FsService
 │   │       │   ├── ops.rs  # ls, stat, read, write, mkdir, mv, rm, cp
-│   │       │   ├── grep.rs
-│   │       │   ├── find.rs
-│   │       │   └── atomic.rs
+│   │       │   ├── grep.rs # text search (regex crate)
+│   │       │   ├── find.rs # glob search (walkdir + globset)
+│   │       │   └── atomic.rs # atomic write-by-rename (streaming AsyncRead)
 │   │       ├── policy/
-│   │       │   ├── mod.rs  # PolicyEngine
-│   │       │   └── path.rs # canonical path resolution, symlink check
+│   │       │   ├── mod.rs  # PolicyEngine; DashMap glob cache
+│   │       │   └── path.rs # resolve_read_path / resolve_write_path; path-clean
 │   │       ├── db/
-│   │       │   ├── mod.rs  # DB pool, migrations
+│   │       │   ├── mod.rs  # sqlx pool (SQLite WAL), migrations
 │   │       │   ├── mounts.rs
-│   │       │   ├── tokens.rs
+│   │       │   ├── tokens.rs # Argon2 verify via spawn_blocking
 │   │       │   └── audit.rs
 │   │       └── auth/
 │   │           └── mod.rs  # token extraction + scope verification
@@ -1151,8 +1288,7 @@ memo/
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── main.rs     # clap app + global flags
-│   │       ├── client.rs   # hyper UnixConnector, request builder
-│   │       └── commands/
+│   │       └── commands/   # all commands use memo-client for HTTP transport
 │   │           ├── ls.rs
 │   │           ├── tree.rs
 │   │           ├── cat.rs
@@ -1160,20 +1296,28 @@ memo/
 │   │           ├── mkdir.rs
 │   │           ├── mv.rs
 │   │           ├── rm.rs
-│   │           ├── cp.rs
+│   │           ├── cp.rs   # local→mount: reads local file, calls write endpoint ad for mount→mount
 │   │           ├── grep.rs
 │   │           ├── find.rs
 │   │           ├── info.rs
 │   │           ├── mount.rs
 │   │           ├── token.rs
 │   │           └── daemon.rs
-│   ├── memo-ui/            # Tauri admin UI
+│   ├── memo-client/        # shared typed REST client (reqwest-based)
 │   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs      # MemoClient struct; base URL config; bearer token injection
+│   │       ├── fs.rs       # typed wrappers for /v1/fs/* endpoints
+│   │       └── meta.rs     # typed wrappers for /v1/meta/* endpoints
+│   ├── memo-ui/            # Tauri v2 native macOS desktop admin application
 │   │   ├── src-tauri/
-│   │   │   ├── Cargo.toml
+│   │   │   ├── Cargo.toml  # crate-type = ["staticlib", "cdylib", "rlib"]
+│   │   │   ├── capabilities/
+│   │   │   │   └── default.json  # Tauri v2 capability declarations
 │   │   │   └── src/
 │   │   │       ├── main.rs
-│   │   │       └── commands.rs   # Tauri commands wrapping memod HTTP calls
+│   │   │       ├── lib.rs        # shared lib entry (required for Tauri v2)
+│   │   │       └── commands.rs   # Tauri invoke commands using memo-client
 │   │   └── src/                  # web frontend
 │   │       ├── index.html
 │   │       ├── app.js
@@ -1183,7 +1327,7 @@ memo/
 │       └── src/
 │           ├── lib.rs
 │           ├── types.rs    # Mount, Token, AuditEntry, DirEntry structs
-│           ├── errors.rs   # ErrorCode enum, ApiError struct
+│           ├── errors.rs   # ApiError, PolicyError, DbError (thiserror)
 │           └── scopes.rs   # scope parsing + checking
 ├── docs/
 │   ├── vision.md
@@ -1209,24 +1353,35 @@ resolver = "2"
 members = [
   "crates/memod",
   "crates/memo",
+  "crates/memo-client",
   "crates/memo-ui/src-tauri",
   "crates/memo-core",
 ]
 
 [workspace.dependencies]
-tokio        = { version = "1", features = ["full"] }
-axum         = { version = "0.7", features = ["macros"] }
-hyper        = { version = "1" }
-serde        = { version = "1", features = ["derive"] }
-serde_json   = "1"
-rusqlite     = { version = "0.31", features = ["bundled"] }
-argon2       = "0.5"
-globset      = "0.4"
-tracing      = "0.1"
+tokio              = { version = "1", features = ["full"] }
+axum               = { version = "0.7", features = ["macros"] }
+hyper              = { version = "1" }               # used by memod server side only
+reqwest            = { version = "0.12", features = ["json", "stream"] }  # memo-client HTTP transport
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+sqlx               = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls", "macros"] }
+argon2             = "0.5"
+globset            = "0.4"
+dashmap            = "6"                             # concurrent hashmap for glob cache
+path-clean         = "1"                             # path normalization for symlink check
+tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
-uuid         = { version = "1", features = ["v4"] }
-clap         = { version = "4", features = ["derive"] }
-toml         = "0.8"
+uuid               = { version = "1", features = ["v4"] }
+clap               = { version = "4", features = ["derive"] }
+toml               = "0.8"
+thiserror          = "2"                             # ergonomic error types
+regex              = "1"                             # grep implementation
+walkdir            = "2"                             # recursive directory traversal
+mime_guess         = "2"                             # Content-Type detection
+chrono             = { version = "0.4", features = ["serde"] }  # ISO 8601 timestamps
+tauri              = { version = "2", features = [] }
+tauri-plugin-store = "2"                             # token storage for memo-ui
 ```
 
 ---
@@ -1275,8 +1430,8 @@ Each test:
 
 1. Creates a temporary directory as mount root
 2. Creates a temporary SQLite database
-3. Starts `memod` bound to a temp Unix socket
-4. Runs operations via direct HTTP (using `reqwest` with Unix socket support) or the `memo` CLI binary
+3. Starts `memod` bound to a random loopback port (e.g. `127.0.0.1:0`, OS assigns port)
+4. Runs operations via `reqwest` pointed at the test port, or via the `memo` CLI binary with `--port`
 5. Asserts responses and filesystem state
 6. Tears down daemon and temp files
 
@@ -1306,12 +1461,16 @@ Run as part of integration suite, tagged `#[test] #[ignore = "security"]` and en
 
 ## 19. Open Questions
 
-1. **`memo-ui` socket access:** Should `memo-ui` connect to `memod` over the Unix socket directly (same as CLI), or should `memod` optionally expose a loopback TCP port (e.g. `127.0.0.1:18301`) for UI convenience? Direct Unix socket is simpler and avoids any network surface. The Tauri Rust backend can use the same `hyper` + `UnixConnector` approach as the CLI — this is the preferred path unless it proves unworkable.
+1. ~~**`memo-ui` transport**~~ — **Resolved:** `memo-ui` connects to `memod` via REST HTTP on `127.0.0.1:18301` using the shared `memo-client` crate.
 
 2. **Token expiry defaults:** Should `POST /v1/meta/tokens` accept a `default_ttl_days` config, or should tokens always be non-expiring unless `expires_at` is explicitly set? The current design defaults to non-expiring; a sensible alternative is a 90-day default for agent tokens.
 
-3. **Daemon auto-start:** Should the `memo` CLI auto-start `memod` if the socket is unreachable (like Docker)? This is ergonomic but adds complexity (process management, stdout capture for the initial admin token). Alternative: require manual `memo daemon start` or a launchd/systemd service.
+3. **Daemon auto-start:** Should the `memo` CLI auto-start `memod` if the daemon is unreachable (connection refused on port 18301)? This is ergonomic but adds complexity (process management, reading bootstrap token from file). Alternative: require manual `memo daemon start` or a launchd/systemd service.
 
 4. **`SIGHUP` config reload:** Should `memod` support `SIGHUP` to reload `config.toml` without restart? Mount and token changes already take effect immediately (SQLite reads per request). The only config that would benefit from reload is log level and write options. Low priority for v1.
 
-5. **macOS Keychain integration:** Store human tokens in the macOS Keychain (via `security add-generic-password`) in v1, or defer to v2 and use the `~/.config/memo/tokens/` file fallback exclusively? Keychain adds a dependency on macOS-specific APIs but improves security posture for the human operator.
+5. ~~**macOS Keychain integration**~~ — **Resolved for v1:** CLI stores tokens in `~/.config/memo/tokens/<name>.token` (mode `0600`). Keychain integration deferred to v2.
+
+6. ~~**REST API / TCP exposure**~~ — **Resolved:** `memod` exposes REST HTTP/1.1 on `127.0.0.1:18301` (loopback only). `memo-client` uses `reqwest`.
+
+7. **`cp` at the daemon level for external sources:** The daemon `cp` endpoint currently handles mount-to-mount only. Local→mount copies are handled by the CLI transparently (read local + write). Should there be a dedicated `/v1/fs/upload` endpoint for external-path ingestion at the daemon level, or is the CLI-side approach sufficient for v1? **Needs decision.**
