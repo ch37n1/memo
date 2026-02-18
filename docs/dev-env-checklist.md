@@ -17,14 +17,7 @@
 - [ ] Ensure deterministic builds (lockfiles, vendoring policy if relevant)
 - [ ] Establish local config handling: env template, safe defaults, validation
 - [ ] Processes description in readme.md and agent.md
-    - [ ] For all tasks we must do these steps (unless said opposite):
-        - check if there is skill avaliable for task
-        - if not ready on local, then search with `Find Skills` skill
-        - if not found then do not use skill and do by yourself
-        - run all linters & formatters
-        - recheck all change with review agent
-        - tests step (add & check)
-        - documentation update step (check if doc need to be updated and do so if need)
+
 
 In future (next month):
 - [ ] Code health
