@@ -22,7 +22,7 @@ All IPC is over **REST HTTP/1.1 on loopback TCP (`127.0.0.1:18301`)**. The daemo
 - Memory safety without GC — critical for a daemon doing path manipulation
 - Single static binary output for `memod` and `memo`
 - Tauri requires Rust for the backend; using Rust everywhere means one toolchain (Cargo workspace)
-- Strong ecosystem for async HTTP (`axum`/`hyper`), SQLite (`sqlx`), and path handling
+- Strong ecosystem for async HTTP (`axum`), SQLite (`sqlx`), and path handling
 
 ---
 
@@ -74,7 +74,7 @@ One human operator. One or more LLM agents. All on the same machine. No multi-us
 | FR-09 | Token-based auth: opaque tokens, stored hashed (Argon2id), scoped per mount and operation |
 | FR-10 | All operations are logged to an audit log (SQLite) |
 | FR-11 | CLI produces plain text by default; `--json` flag for structured output |
-| FR-12 | `memo-ui` provides a web-based admin interface for mount and token management |
+| FR-12 | `memo-ui` provides a native macOS desktop application (Tauri v2) for mount and token management |
 | FR-13 | Directory info from `index.md` frontmatter is surfaced via `stat` and `info` commands |
 
 ---
@@ -122,7 +122,7 @@ One human operator. One or more LLM agents. All on the same machine. No multi-us
 │              │  │policy layer │  │     │     SQLite       │   │
 │              │  └──────┬──────┘  │────▶│  mounts         │   │
 │              │         │         │     │  tokens         │   │
-│              │  ┌──────▼──────┐  │     │  audit_log      │   │
+│              │  ┌──────▼──────┐  │     │  metainfo       │
 │              │  │  fs layer   │  │     └─────────────────┘   │
 │              │  └──────┬──────┘  │                            │
 │              └─────────┼─────────┘                            │
@@ -162,6 +162,20 @@ Single async binary built on `tokio` + `axum`. Listens on TCP loopback (`127.0.0
 7. Register signal handlers: `SIGTERM`/`SIGINT` for graceful shutdown
 8. Spawn background task: prune `audit_log` if row count exceeds `max_audit_log_rows` (non-blocking — daemon is already serving by this point)
 
+**Daemon launch mechanism (`memo daemon start`):**
+
+On macOS, `memo daemon start` installs a launchd plist and loads it via `launchctl`. This gives automatic restart on crash, proper log routing, and correct user-session lifecycle — without requiring a separate process manager.
+
+1. Write a plist to `~/Library/LaunchAgents/io.github.ch37n1.memo.memod.plist` with:
+   - `Label`: `io.github.ch37n1.memo.memod`
+   - `ProgramArguments`: path to `memod` binary
+   - `RunAtLoad`: `false` (only run when loaded, not on every login)
+   - `StandardOutPath` / `StandardErrorPath`: `~/.local/state/memo/memod.log`
+2. Call `launchctl load ~/Library/LaunchAgents/io.github.ch37n1.memo.memod.plist`.
+
+`memo daemon stop` calls `launchctl unload` on the same plist.
+`memo daemon status` checks for the PID file at `$XDG_RUNTIME_DIR/memo/memod.pid` and calls `GET /health`.
+
 **Internal modules:**
 
 ```
@@ -181,8 +195,8 @@ memod/src/
 ├── db/
 │   ├── mod.rs       # sqlx pool (SQLite WAL), migration runner
 │   ├── mounts.rs    # mount CRUD (invalidates glob cache on write)
-│   ├── tokens.rs    # token CRUD; Argon2 verify via spawn_blocking
-│   └── audit.rs     # audit log insertion
+│   └── tokens.rs    # token CRUD; Argon2 verify via spawn_blocking
+├── audit.rs         # append JSON lines to ~/.local/state/memo/audit.log
 └── auth/
     └── mod.rs       # token extraction, scope verification
 ```
@@ -211,20 +225,32 @@ Accepts an `AsyncRead` source to support streaming without full in-memory buffer
 
 ```rust
 // atomic.rs
-pub async fn atomic_write<R>(target: &Path, mut reader: R, fsync: bool) -> Result<u64>
+pub async fn atomic_write<R>(
+    target: &Path,
+    mut reader: R,
+    fsync: bool,
+    dir_sync: bool,
+) -> Result<u64>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
     let dir = target.parent().ok_or(Error::InvalidPath)?;
     let tmp = dir.join(format!(".memo_tmp_{}", uuid::Uuid::new_v4().simple()));
     let result = async {
-        let mut file = fs::File::create(&tmp).await?;
-        let written = tokio::io::copy(&mut reader, &mut file).await?;
+        let file = fs::File::create(&tmp).await?;
+        let mut buffered = tokio::io::BufWriter::new(file);
+        let written = tokio::io::copy(&mut reader, &mut buffered).await?;
         if fsync {
-            file.sync_all().await?;
+            buffered.into_inner().sync_all().await?;
+        } else {
+            buffered.flush().await?;
         }
-        drop(file);
         fs::rename(&tmp, target).await?;
+        if dir_sync {
+            // sync parent directory entry so rename is durable
+            let dir_fd = fs::File::open(dir).await?;
+            dir_fd.sync_all().await?;
+        }
         Ok(written)
     }
     .await;
@@ -259,7 +285,8 @@ memo/src/
     ├── find.rs
     ├── info.rs
     ├── mount.rs     # mount management (add, remove, list, update)
-    └── token.rs     # token management (create, revoke, list)
+    ├── token.rs     # token management (create, revoke, list)
+    └── audit.rs     # audit log viewer (reads from GET /v1/meta/audit)
 ```
 
 **Token resolution order (CLI):**
@@ -294,7 +321,9 @@ memo/src/
 
 **Admin token setup:** On first launch, `memo-ui` shows a setup screen prompting the user to paste their admin token (obtained from `~/.config/memo/bootstrap.token`). The token is stored via `tauri-plugin-store` in the macOS app data directory (sandboxed). All subsequent launches read the token from the store.
 
-**macOS app bundle identifier:** `io.github.memo`
+**macOS app bundle identifier:** `io.github.ch37n1.memo`
+
+**All calls to `memod` are made via Tauri `invoke` commands in the Rust backend.** No JS-side `fetch` to `127.0.0.1:18301` is used. The CSP does not need `connect-src` for loopback access.
 
 **Content Security Policy** (`tauri.conf.json`):
 
@@ -306,22 +335,86 @@ memo/src/
 }
 ```
 
+**`tauri-plugin-store` registration** (required — the plugin does nothing without this):
+
+```rust
+// src-tauri/src/lib.rs
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_store::Builder::default().build())
+        .invoke_handler(tauri::generate_handler![/* commands */])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+```
+
+```js
+// Frontend JS import
+import { Store } from '@tauri-apps/plugin-store';
+```
+
+The npm package `@tauri-apps/plugin-store` must also be installed as a frontend dependency.
+
+**macOS App Sandbox network entitlement** (`src-tauri/entitlements.macos.plist`):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>
+```
+
+Required for `reqwest` in the Tauri Rust backend to reach `127.0.0.1:18301`. Without this entitlement, all API calls fail with a sandbox violation. Reference in `tauri.conf.json`:
+
+```json
+"bundle": {
+  "macOS": {
+    "entitlements": "entitlements.macos.plist"
+  }
+}
+```
+
+**Frontend framework:** React + Vite (TypeScript). Build config in `tauri.conf.json`:
+
+```json
+"build": {
+  "beforeDevCommand": "npm run dev",
+  "beforeBuildCommand": "npm run build",
+  "devUrl": "http://localhost:5173",
+  "frontendDist": "../dist"
+}
+```
+
 **Directory layout:**
 
 ```
 memo-ui/
 ├── src-tauri/
 │   ├── capabilities/
-│   │   └── default.json  # Tauri v2 capability declarations (required)
+│   │   └── default.json         # Tauri v2 capability declarations (required)
+│   ├── entitlements.macos.plist # macOS App Sandbox network entitlement
 │   ├── src/
 │   │   ├── main.rs
-│   │   ├── lib.rs        # shared lib entry point (required for Tauri v2)
-│   │   └── commands.rs   # Tauri invoke commands using memo-client
-│   └── Cargo.toml        # crate-type = ["staticlib", "cdylib", "rlib"]
-└── src/                  # web frontend (HTML/CSS/JS or framework)
-    ├── index.html
-    ├── app.js
-    └── style.css
+│   │   ├── lib.rs               # shared lib entry point (required for Tauri v2)
+│   │   └── commands.rs          # Tauri invoke commands using memo-client
+│   └── Cargo.toml               # crate-type = ["staticlib", "cdylib", "rlib"]
+├── src/                         # React frontend (TypeScript)
+│   ├── main.tsx
+│   ├── App.tsx
+│   ├── components/
+│   │   ├── MountList.tsx
+│   │   ├── TokenList.tsx
+│   │   └── AuditLog.tsx
+│   └── hooks/
+│       └── useMemoClient.ts     # typed wrappers around Tauri invoke commands
+├── index.html
+├── package.json
+├── tsconfig.json
+└── vite.config.ts
 ```
 
 **`capabilities/default.json` (minimum):**
@@ -361,13 +454,13 @@ Admin operations (mount registration, token creation) require tokens with `admin
 
 **Auth header:** `Authorization: Bearer <token>` on every request.
 
-**Address resolution (in order):**
+**Address resolution (in order, highest priority first):**
 
 ```
-Priority 1: MEMO_HOST / MEMO_PORT environment variables
-Priority 2: ~/.config/memo/config.toml [daemon] bind_addr
+Priority 1: --host / --port CLI flags
+Priority 2: MEMO_HOST / MEMO_PORT environment variables
+Priority 3: ~/.config/memo/config.toml [daemon] bind_addr
 Default:    127.0.0.1:18301
-Override:   --host / --port CLI flags
 ```
 
 **Example curl debug session:**
@@ -423,18 +516,20 @@ Path validation is the most security-critical component. It runs before any file
 
 `mount_root.join(&relative)` produces a non-normalized path (e.g. `/vault/notes/./git.md`). Comparing it directly to the canonicalized result produces false positives. Normalize with `path_clean::clean` before comparing.
 
+`CompiledMount` holds the pre-computed `root_path_canonical: PathBuf` (resolved once at mount load time, stored in the `DashMap` cache). The per-request validation uses it directly — no extra `canonicalize` syscall on `mount_root` per request.
+
 For **read operations** (path must already exist):
 
 ```rust
+// mount.root_path_canonical is pre-computed at mount load time (no syscall here)
 let joined = mount_root.join(&relative);
 let normalized = path_clean::clean(&joined);       // collapse `.` without syscall
 let canonical = tokio::fs::canonicalize(&joined).await?;
-let root_canonical = tokio::fs::canonicalize(&mount_root).await?;
 
 if normalized != canonical {
     return Err(PolicyError::SymlinkDenied);
 }
-if !canonical.starts_with(&root_canonical) {
+if !canonical.starts_with(&mount.root_path_canonical) {
     return Err(PolicyError::OutOfBounds);
 }
 ```
@@ -455,7 +550,7 @@ let normalized_parent = path_clean::clean(parent);
 if normalized_parent != canonical_parent {
     return Err(PolicyError::SymlinkDenied);
 }
-if !canonical.starts_with(&root_canonical) {
+if !canonical.starts_with(&mount.root_path_canonical) {
     return Err(PolicyError::OutOfBounds);
 }
 ```
@@ -500,21 +595,8 @@ CREATE TABLE tokens (
   last_used_at TEXT                                -- updated on each verified use
 );
 
-CREATE TABLE audit_log (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  timestamp  TEXT NOT NULL DEFAULT (datetime('now')),
-  token_id   TEXT,                                 -- NULL if auth failed
-  operation  TEXT NOT NULL,                        -- ls, read, write, mv, rm, cp, mkdir, grep, find, stat
-  mount      TEXT,
-  path       TEXT,
-  result     TEXT NOT NULL CHECK(result IN ('ok', 'error')),
-  error_code TEXT,                                 -- NULL if result = 'ok'
-  details    TEXT                                  -- JSON blob for extra context
-);
-
-CREATE INDEX idx_audit_log_timestamp ON audit_log(timestamp);
-CREATE INDEX idx_audit_log_mount     ON audit_log(mount);
-CREATE INDEX idx_audit_log_token_id  ON audit_log(token_id);
+-- Audit log is stored in a separate file, not in SQLite.
+-- See Section 16 for the audit log file format and location.
 ```
 
 **Migrations** are embedded in the binary using `include_str!` and applied at startup via a simple version table:
@@ -930,7 +1012,11 @@ Revoke token by UUID.
 | `operation` | no | — | Filter by operation type |
 | `result` | no | — | `ok` or `error` |
 | `limit` | no | `100` | Max results |
-| `before` | no | — | ISO 8601 timestamp upper bound |
+| `before` | no | — | ISO 8601 timestamp upper bound (returns entries older than this) |
+| `after` | no | — | ISO 8601 timestamp lower bound (returns entries newer than this, ascending order) |
+| `after_id` | no | — | Sequential log entry ID lower bound; use for forward pagination when polling for new entries |
+
+When `after` or `after_id` is provided, entries are returned in **ascending** (oldest-first) order to support polling clients. When only `before` is provided (or no time filter), entries are returned in **descending** (newest-first) order.
 
 **Response `200`:**
 
@@ -951,6 +1037,18 @@ Revoke token by UUID.
 }
 ```
 
+### 11.3 Utility Endpoints
+
+#### `GET /health`
+
+No auth required. Used by `memo daemon status` to verify the daemon is reachable.
+
+**Response `200`:**
+
+```json
+{"status": "ok", "version": "0.1.0"}
+```
+
 ---
 
 ## 12. Token & Auth Model
@@ -963,7 +1061,15 @@ Raw tokens use the format `memo_<random_base62_32chars>`. This prefix aids ident
 
 Tokens are hashed with Argon2id before storage. Parameters: `m=19456` (19 MiB), `t=2`, `p=1` (OWASP recommended minimum).
 
-**Verification** is CPU-intensive (~50–100ms at these parameters). All `argon2::verify_encoded` calls are dispatched via `tokio::task::spawn_blocking` to avoid blocking the async runtime thread pool.
+**Verification** is CPU-intensive (~50–100ms at these parameters). Verification uses the `password-hash` crate traits and is dispatched via `tokio::task::spawn_blocking` to avoid blocking the async runtime thread pool:
+
+```rust
+use argon2::{Argon2, PasswordVerifier};
+use password_hash::PasswordHash;
+
+let parsed = PasswordHash::new(&hash).map_err(|_| AuthError::TokenInvalid)?;
+Argon2::default().verify_password(raw_token.as_bytes(), &parsed)?;
+```
 
 ```sql
 -- tokens table: hash column stores argon2id PHC string
@@ -1131,12 +1237,20 @@ memo mount add --name VaultKB --path /Users/me/Obsidian/Vault/SharedKB --mode rw
 memo mount add --name AgentData --path ~/.local/share/memo/agent --mode rw --audience agent-only
 memo mount remove VaultKB
 memo mount show VaultKB
+memo mount update VaultKB --mode ro
+memo mount update VaultKB --hide-glob ".obsidian/**" --max-write-bytes 5242880
 
 # Token management
 memo token list
 memo token create --name claude-agent --scopes "fs:VaultKB:read,fs:VaultKB:write"
 memo token create --name human-admin --scopes "admin:*" --expires 2024-12-31T00:00:00Z
 memo token revoke <token-id>
+
+# Audit log
+memo audit
+memo audit --mount VaultKB
+memo audit --limit 50
+memo audit --after 2024-01-15T00:00:00Z
 
 # Daemon
 memo daemon start
@@ -1216,7 +1330,7 @@ fsync = false             # enable fsync before rename (safer, slower)
 dir_sync = false          # sync parent directory after rename
 
 [daemon.limits]
-max_audit_log_rows = 100000   # rows before oldest are pruned (pruning runs as background task on startup)
+max_audit_log_rows = 100000   # entries before rotation (background task on startup rotates audit.log → audit.log.1)
 ```
 
 ---
@@ -1225,9 +1339,17 @@ max_audit_log_rows = 100000   # rows before oldest are pruned (pruning runs as b
 
 ### Audit Log
 
-Every operation (successful or failed) writes one row to `audit_log`. This includes auth failures. Auth failures write `token_id = NULL`.
+Every operation (successful or failed) appends one JSON line to `$XDG_STATE_HOME/memo/audit.log` (default: `~/.local/state/memo/audit.log`). This includes auth failures — auth failures write `token_id: null`.
 
-The audit log is queryable via `GET /v1/meta/audit` and `memo audit` (future CLI command). In v1, no automatic pruning — the `max_audit_log_rows` config triggers a prune on startup.
+Audit entries are **not** stored in SQLite. The file is append-only JSON lines (one JSON object per line), with monotonically increasing `id` (sequential counter, not autoincrement from DB) for forward pagination support.
+
+Audit log entry format:
+
+```json
+{"id": 1, "timestamp": "2024-01-15T10:30:00.123Z", "token_id": "550e8400-...", "operation": "read", "mount": "VaultKB", "path": "/notes/git.md", "result": "ok", "error_code": null}
+```
+
+The audit log is queryable via `GET /v1/meta/audit` (reads and filters from the log file) and `memo audit` (v1 CLI command — see Section 14). Pruning: if `audit.log` exceeds `max_audit_log_rows` entries, a background task at startup rotates it to `audit.log.1` and starts a new file.
 
 ### Structured Logging (memod)
 
@@ -1250,9 +1372,7 @@ Format (JSON):
 
 ### Health Check
 
-`GET /health` — no auth required. Returns `{"status": "ok", "version": "0.1.0"}`.
-
-Used by `memo daemon status` to verify the daemon is reachable.
+`GET /health` — no auth required. See Section 11.3 for the full endpoint spec. Used by `memo daemon status` to verify the daemon is reachable.
 
 ---
 
@@ -1280,8 +1400,8 @@ memo/
 │   │       ├── db/
 │   │       │   ├── mod.rs  # sqlx pool (SQLite WAL), migrations
 │   │       │   ├── mounts.rs
-│   │       │   ├── tokens.rs # Argon2 verify via spawn_blocking
-│   │       │   └── audit.rs
+│   │       │   └── tokens.rs # Argon2 verify via spawn_blocking
+│   │       ├── audit.rs    # append JSON lines to ~/.local/state/memo/audit.log
 │   │       └── auth/
 │   │           └── mod.rs  # token extraction + scope verification
 │   ├── memo/               # CLI binary
@@ -1302,6 +1422,7 @@ memo/
 │   │           ├── info.rs
 │   │           ├── mount.rs
 │   │           ├── token.rs
+│   │           ├── audit.rs
 │   │           └── daemon.rs
 │   ├── memo-client/        # shared typed REST client (reqwest-based)
 │   │   ├── Cargo.toml
@@ -1313,15 +1434,25 @@ memo/
 │   │   ├── src-tauri/
 │   │   │   ├── Cargo.toml  # crate-type = ["staticlib", "cdylib", "rlib"]
 │   │   │   ├── capabilities/
-│   │   │   │   └── default.json  # Tauri v2 capability declarations
+│   │   │   │   └── default.json         # Tauri v2 capability declarations
+│   │   │   ├── entitlements.macos.plist # macOS App Sandbox network entitlement
 │   │   │   └── src/
 │   │   │       ├── main.rs
-│   │   │       ├── lib.rs        # shared lib entry (required for Tauri v2)
-│   │   │       └── commands.rs   # Tauri invoke commands using memo-client
-│   │   └── src/                  # web frontend
-│   │       ├── index.html
-│   │       ├── app.js
-│   │       └── style.css
+│   │   │       ├── lib.rs               # shared lib entry (required for Tauri v2)
+│   │   │       └── commands.rs          # Tauri invoke commands using memo-client
+│   │   ├── src/                         # React frontend (TypeScript)
+│   │   │   ├── main.tsx
+│   │   │   ├── App.tsx
+│   │   │   ├── components/
+│   │   │   │   ├── MountList.tsx
+│   │   │   │   ├── TokenList.tsx
+│   │   │   │   └── AuditLog.tsx
+│   │   │   └── hooks/
+│   │   │       └── useMemoClient.ts
+│   │   ├── index.html
+│   │   ├── package.json
+│   │   ├── tsconfig.json
+│   │   └── vite.config.ts
 │   └── memo-core/          # shared types, protocol structs, error types
 │       ├── Cargo.toml
 │       └── src/
@@ -1361,12 +1492,17 @@ members = [
 [workspace.dependencies]
 tokio              = { version = "1", features = ["full"] }
 axum               = { version = "0.7", features = ["macros"] }
-hyper              = { version = "1" }               # used by memod server side only
+# hyper removed — axum 0.7 already depends on hyper 1.x; no direct use
 reqwest            = { version = "0.12", features = ["json", "stream"] }  # memo-client HTTP transport
 serde              = { version = "1", features = ["derive"] }
 serde_json         = "1"
-sqlx               = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls", "macros"] }
+# macros feature dropped for v1 — avoids DATABASE_URL compile-time requirement.
+# Use runtime query() API instead of query!(). Add macros + sqlx prepare workflow if
+# compile-time SQL checking is desired in the future.
+sqlx               = { version = "0.8", features = ["sqlite", "runtime-tokio-rustls"] }
 argon2             = "0.5"
+password-hash      = "0.5"                           # required for argon2 v0.5 PasswordHash API
+rand               = "0.8"                           # token generation (base62 random bytes)
 globset            = "0.4"
 dashmap            = "6"                             # concurrent hashmap for glob cache
 path-clean         = "1"                             # path normalization for symlink check
