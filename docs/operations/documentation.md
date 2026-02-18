@@ -249,6 +249,19 @@ Decision records capture the reasoning behind significant choices at the time th
 
 ---
 
+## Archive
+
+The `archive/` directory holds documents that are no longer actively maintained — superseded designs, outdated plans, or deprecated agreements. Archived docs are kept for historical reference only.
+
+### Rules
+
+- Move a document to `archive/` instead of deleting it when it still has historical value
+- Do not update archived documents; they are read-only snapshots
+- Add a note at the top of each archived file: _"This document is archived and no longer current. See [replacement link] for current information."_
+- Flat structure preferred — no subdirectories unless volume demands it
+
+---
+
 ## Docs Directory Structure
 
 | Directory | Purpose | Truth type |
@@ -261,6 +274,7 @@ Decision records capture the reasoning behind significant choices at the time th
 | `development/` | Local setup, coding guidelines, testing strategy | Procedural truth |
 | `operations/` | Configuration, monitoring, documentation agreements (this file) | Operational truth |
 | `references/` | API specs, data model, external links | Lookup material |
+| `archive/` | Deprecated or superseded documents no longer actively maintained | Historical truth |
 
 
 Example:
@@ -306,7 +320,10 @@ docs/
 │   ├── configuration.md
 │   └── monitoring.md
 │
-└── references/                # Lookup material
-    ├── api.md
-    └── data-model.md
+├── references/                # Lookup material
+│   ├── api.md
+│   └── data-model.md
+│
+└── archive/                   # Deprecated or superseded documents
+    └── ...
 ```

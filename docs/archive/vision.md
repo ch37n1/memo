@@ -1,3 +1,12 @@
+---
+description: Project vision, doc that created before design doc. First view on the project.
+created_at: 2026.02.18
+deprecated_at: 2026.02.19
+---
+
+> [!warning] Archived
+> This document is archived and no longer current. See `docs/README.md` for current information.
+
 # memo — Vision (v1)
 
 ## 1. Purpose
