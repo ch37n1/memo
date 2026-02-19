@@ -40,7 +40,10 @@ MVP — single-user personal tool. One human operator, one or more LLM agents, a
   - remaining: finalize all A3 deliverables before marking phase complete
 - Stream B Phase 1 (`B1: memo-client`) is complete.
 - Stream B Phase 2 (`B2: CLI scaffolding + daemon commands`) is complete.
-- Next active milestone is Phase 3 (mount system): A3/B3.
+- Stream B Phase 3 (`B3: CLI admin commands`) is complete.
+- Next active milestones are:
+  - Stream A: Phase 3 (`A3: mount registry BC`)
+  - Stream B: Phase 4 (`B4: CLI filesystem commands`)
 
 ### Goals (v1)
 

@@ -1,5 +1,5 @@
 ---
-description: CLI design — global option resolution, daemon command behavior, and exit code policy
+description: CLI design — global option resolution, command behavior, output policy, and exit codes
 tags:
   - design
   - cli
@@ -50,6 +50,27 @@ Global flags are available across subcommands:
 - `memo daemon logs --tail N`
   - Reads `memod` log file directly from local filesystem
 
+## Admin Commands (Phase 3 / B3)
+
+- `memo mount list`
+- `memo mount add --name --path --mode --audience [policy flags...]`
+  - Supports repeated or CSV glob flags: `--hide-glob`, `--deny-read-glob`, `--deny-write-glob`
+- `memo mount show <name>`
+- `memo mount remove <name>`
+- `memo mount update <name> [partial flags...]`
+  - Supports explicit clear flags:
+    - `--clear-description`
+    - `--clear-hide-globs`
+    - `--clear-deny-read-globs`
+    - `--clear-deny-write-globs`
+    - `--clear-max-read-bytes`
+    - `--clear-max-write-bytes`
+- `memo token list`
+- `memo token create --name --scopes [--expires RFC3339]`
+  - Plain mode prints the raw token value so it can be copied immediately.
+- `memo token revoke <token-id>`
+- `memo audit [--mount --token-id --operation --result --limit --before --after]`
+
 ## Output Modes
 
 - Default mode: human-readable plain text
@@ -60,5 +81,6 @@ Global flags are available across subcommands:
 - `0` success
 - `1` general/config/command error
 - `2` auth error
+- `3` permission/policy error
+- `4` not found
 - `5` daemon unreachable
-

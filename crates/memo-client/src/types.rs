@@ -150,7 +150,7 @@ pub struct UpdateMountRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audience: Option<Audience>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    pub description: Option<PatchValue<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hide_globs: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -158,9 +158,16 @@ pub struct UpdateMountRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deny_write_globs: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_read_bytes: Option<u64>,
+    pub max_read_bytes: Option<PatchValue<u64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_write_bytes: Option<u64>,
+    pub max_write_bytes: Option<PatchValue<u64>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PatchValue<T> {
+    Value(T),
+    Null,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
