@@ -10,7 +10,7 @@ tags:
 
 `memo` is designed as a local daemon that mediates all filesystem access between clients and the underlying filesystem. No client ever touches the filesystem directly. All access is policy-enforced and authenticated.
 
-Current implementation status: architecture below is the target v1 runtime design; implementation is in progress by roadmap phase.
+Current implementation status: phases 0-5 are complete; architecture below reflects the implemented v1 runtime baseline.
 
 ```mermaid
 graph TB

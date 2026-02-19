@@ -3,6 +3,21 @@ use std::path::Path;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicWriteOptions {
+    pub fsync: bool,
+    pub dir_sync: bool,
+}
+
+impl Default for AtomicWriteOptions {
+    fn default() -> Self {
+        Self {
+            fsync: true,
+            dir_sync: true,
+        }
+    }
+}
+
 /// Atomically writes bytes to `target` by writing a temp file in the same
 /// directory and renaming into place.
 ///
@@ -10,7 +25,11 @@ use uuid::Uuid;
 ///
 /// Returns `std::io::Error` when creating parent dirs, writing, syncing,
 /// renaming, or cleanup fails.
-pub async fn atomic_write_bytes(target: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
+pub async fn atomic_write_bytes(
+    target: &Path,
+    bytes: &[u8],
+    options: AtomicWriteOptions,
+) -> Result<(), std::io::Error> {
     let parent = target.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -26,10 +45,17 @@ pub async fn atomic_write_bytes(target: &Path, bytes: &[u8]) -> Result<(), std::
     let write_result = async {
         let mut temp_file = tokio::fs::File::create(&temp_path).await?;
         temp_file.write_all(bytes).await?;
-        temp_file.sync_all().await?;
+        if options.fsync {
+            temp_file.sync_all().await?;
+        }
         temp_file.flush().await?;
         drop(temp_file);
-        tokio::fs::rename(&temp_path, target).await
+        tokio::fs::rename(&temp_path, target).await?;
+        if options.dir_sync {
+            let dir = tokio::fs::File::open(parent).await?;
+            dir.sync_all().await?;
+        }
+        Ok(())
     }
     .await;
 
@@ -42,6 +68,7 @@ pub async fn atomic_write_bytes(target: &Path, bytes: &[u8]) -> Result<(), std::
 
 #[cfg(test)]
 mod tests {
+    use crate::fs::atomic::AtomicWriteOptions;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -49,7 +76,7 @@ mod tests {
         let tempdir = tempdir()?;
         let target = tempdir.path().join("notes").join("a.md");
 
-        super::atomic_write_bytes(&target, b"hello").await?;
+        super::atomic_write_bytes(&target, b"hello", AtomicWriteOptions::default()).await?;
 
         let content = tokio::fs::read_to_string(target).await?;
         assert_eq!(content, "hello");

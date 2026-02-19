@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -5,8 +6,9 @@ use axum::http::{HeaderMap, Request};
 use axum::middleware::Next;
 use axum::response::Response;
 use memo_core::repositories::TokenRepository;
-use memo_core::{ApiError, Token};
+use memo_core::{ApiError, AuthError, DenialReason, DomainEvent, Token};
 
+use crate::audit::AuditService;
 use crate::auth::repository::SqliteTokenRepository;
 use crate::HttpError;
 
@@ -16,6 +18,7 @@ pub struct VerifiedToken(pub Token);
 #[derive(Debug, Clone)]
 pub struct AuthState {
     pub token_repository: Arc<SqliteTokenRepository>,
+    pub audit_service: Arc<AuditService>,
 }
 
 /// Validates bearer auth and attaches the verified token to request extensions.
@@ -30,10 +33,42 @@ pub(crate) async fn auth_middleware(
     mut request: Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, HttpError> {
-    let token = extract_bearer_token(request.headers())?;
-    let verified = state.token_repository.verify(&token).await?;
+    let token = match extract_bearer_token(request.headers()) {
+        Ok(token) => token,
+        Err(error) => {
+            record_denial(&state.audit_service, DenialReason::AuthRequired).await;
+            return Err(error);
+        }
+    };
+    let verified = match state.token_repository.verify(&token).await {
+        Ok(token) => token,
+        Err(error) => {
+            let reason = match error {
+                AuthError::AuthRequired => DenialReason::AuthRequired,
+                AuthError::TokenInvalid => DenialReason::TokenInvalid,
+                AuthError::TokenExpired => DenialReason::TokenExpired,
+                AuthError::PermissionDenied => DenialReason::MissingScope,
+            };
+            record_denial(&state.audit_service, reason).await;
+            return Err(HttpError::from(error));
+        }
+    };
     request.extensions_mut().insert(VerifiedToken(verified));
     Ok(next.run(request).await)
+}
+
+async fn record_denial(service: &AuditService, reason: DenialReason) {
+    if let Err(error) = service
+        .append_domain_event(DomainEvent::AccessDenied {
+            token_id: None,
+            reason,
+            mount: None,
+        })
+        .await
+    {
+        let mut stderr = std::io::stderr();
+        let _ = writeln!(stderr, "failed to persist auth denial audit entry: {error}");
+    }
 }
 
 fn extract_bearer_token(headers: &HeaderMap) -> Result<String, HttpError> {

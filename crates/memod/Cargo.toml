@@ -31,3 +31,5 @@ uuid.workspace = true
 [dev-dependencies]
 memo-client = { path = "../memo-client" }
 tempfile.workspace = true
+reqwest.workspace = true
+time.workspace = true

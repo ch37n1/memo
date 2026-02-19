@@ -60,8 +60,9 @@ Implementation notes:
 Write behavior uses a write-by-rename approach:
 
 1. write payload to temporary file in target directory
-2. optionally fsync based on config
+2. optionally `fsync` file based on `daemon.write.fsync`
 3. rename temp file to target path atomically
-4. cleanup temp file on error
+4. optionally `fsync` directory based on `daemon.write.dir_sync`
+5. cleanup temp file on error
 
 This prevents partially written target files and is compatible with file watchers.

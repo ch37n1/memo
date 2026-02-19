@@ -40,4 +40,4 @@ Audit queries filter by:
 ## Failure Posture
 
 - Operation success should not depend on non-critical audit formatting details.
-- Audit write failures must be observable via structured logs.
+- Audit write failures must be observable via daemon logs/stderr output.

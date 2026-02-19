@@ -8,7 +8,7 @@ use memo_core::{
 use serde::Serialize;
 use time::OffsetDateTime;
 
-use crate::fs::atomic::atomic_write_bytes;
+use crate::fs::atomic::{atomic_write_bytes, AtomicWriteOptions};
 use crate::fs::find;
 use crate::fs::grep;
 use crate::mount_registry::policy::PolicyEngine;
@@ -21,6 +21,7 @@ const TREE_ENTRY_CAP: usize = 10_000;
 pub struct FileSystemService {
     mount_repository: Arc<SqliteMountRepository>,
     policy_engine: PolicyEngine,
+    write_options: AtomicWriteOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -138,11 +139,15 @@ pub struct FindResponse {
 #[allow(clippy::missing_errors_doc)]
 impl FileSystemService {
     #[must_use]
-    pub fn new(mount_repository: Arc<SqliteMountRepository>) -> Self {
+    pub fn new(
+        mount_repository: Arc<SqliteMountRepository>,
+        write_options: AtomicWriteOptions,
+    ) -> Self {
         let policy_engine = PolicyEngine::new(mount_repository.policy_cache().clone());
         Self {
             mount_repository,
             policy_engine,
+            write_options,
         }
     }
 
@@ -441,7 +446,7 @@ impl FileSystemService {
             .policy_engine
             .resolve_write_path(&mount, path.relative(), write_size)
             .map_err(ApiError::from)?;
-        atomic_write_bytes(&resolved, bytes)
+        atomic_write_bytes(&resolved, bytes, self.write_options)
             .await
             .map_err(|error| ApiError::Internal(error.to_string()))?;
 
@@ -570,7 +575,7 @@ impl FileSystemService {
             .policy_engine
             .resolve_write_path(&dst_mount, dst.relative(), write_size)
             .map_err(ApiError::from)?;
-        atomic_write_bytes(&dst_resolved, &bytes)
+        atomic_write_bytes(&dst_resolved, &bytes, self.write_options)
             .await
             .map_err(|error| ApiError::Internal(error.to_string()))?;
 
@@ -845,7 +850,10 @@ mod tests {
         )?;
         repository.create(&mount).await?;
 
-        Ok(FileSystemService::new(repository))
+        Ok(FileSystemService::new(
+            repository,
+            crate::fs::atomic::AtomicWriteOptions::default(),
+        ))
     }
 
     #[tokio::test]
