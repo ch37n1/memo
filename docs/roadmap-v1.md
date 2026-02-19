@@ -23,9 +23,7 @@ Each item is a complete feature that requires its own implementation plan.
 - Stream B: **B3 DONE** (`memo` CLI admin commands)
 - Stream A: **A1 DONE** (`memod` database layer)
 - Stream A: **A2 DONE** (`Access Control BC`)
-- Stream A: **A3 IN PROGRESS** (`Mount Registry BC`)
-  - done: mount CRUD HTTP handlers (`/v1/meta/mounts*`) behind auth, `SqliteMountRepository`, policy engine read/write resolution, and security/unit test expansion
-  - left: close remaining A3 deliverables and align final implementation with all roadmap constraints
+- Stream A: **A3 DONE** (`Mount Registry BC`)
 
 ---
 
@@ -210,7 +208,7 @@ graph TD
 
 > A builds mount registration and policy enforcement. B adds admin commands to the CLI.
 
-### A3: Mount Registry BC -- **IN PROGRESS**
+### A3: Mount Registry BC -- **DONE**
 
 **Scope:** Mount CRUD, the policy engine (the most security-critical component), and the glob cache.
 
