@@ -687,7 +687,8 @@ mod tests {
     use std::error::Error;
     use std::io::Write;
 
-    use memo_client::{MemoClient, MemoClientConfig};
+    use memo_client::{CreateMountRequest, MemoClient, MemoClientConfig, MemoClientError};
+    use memo_core::{ApiError, Audience, MountMode, MountName, MountPath};
     use tempfile::tempdir;
 
     use super::app_router;
@@ -748,6 +749,167 @@ mod tests {
 
         let tokens = client.list_tokens().await?;
         assert!(!tokens.is_empty());
+
+        let _ = shutdown_tx.send(());
+        handle.await??;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn filesystem_endpoints_round_trip() -> Result<(), Box<dyn Error>> {
+        let tempdir = tempdir()?;
+        let db_path = tempdir.path().join("memo.db");
+        let db_url = format!("sqlite://{}", db_path.display());
+        let bootstrap_path = tempdir.path().join("bootstrap.token");
+        let mount_root = tempdir.path().join("vault");
+        let archive_root = tempdir.path().join("archive");
+        std::fs::create_dir_all(&mount_root)?;
+        std::fs::create_dir_all(&archive_root)?;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+
+        let pool = init_pool(&DbConfig::new(db_url.clone())).await?;
+        let token_repository = std::sync::Arc::new(SqliteTokenRepository::new(pool.clone()));
+        let mount_repository =
+            std::sync::Arc::new(SqliteMountRepository::new(pool, PolicyCache::new()));
+        let state = super::AppState {
+            file_system_service: std::sync::Arc::new(crate::fs::ops::FileSystemService::new(
+                std::sync::Arc::clone(&mount_repository),
+            )),
+            token_repository,
+            mount_repository,
+        };
+
+        if crate::auth::bootstrap_admin_token_if_needed(&state.token_repository, &bootstrap_path)
+            .await?
+            .is_some()
+        {
+            let mut stderr = std::io::stderr();
+            let _ = writeln!(
+                stderr,
+                "bootstrap token written to {}",
+                bootstrap_path.display()
+            );
+        }
+
+        let app = app_router(&state);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = tokio::spawn(super::serve(listener, app, async {
+            let _ = shutdown_rx.await;
+        }));
+
+        let token = tokio::fs::read_to_string(&bootstrap_path)
+            .await?
+            .trim()
+            .to_owned();
+
+        let client = MemoClient::new(MemoClientConfig {
+            base_url: format!("http://{addr}"),
+            token: Some(token),
+            ..MemoClientConfig::default()
+        })?;
+
+        let _ = client
+            .create_mount(&CreateMountRequest {
+                name: MountName::new("VaultKB")?,
+                root_path: mount_root.clone(),
+                mode: MountMode::ReadWrite,
+                audience: Audience::Shared,
+                description: Some("kb".to_owned()),
+                hide_globs: vec![],
+                deny_read_globs: vec![],
+                deny_write_globs: vec![],
+                max_read_bytes: None,
+                max_write_bytes: None,
+            })
+            .await?;
+        let _ = client
+            .create_mount(&CreateMountRequest {
+                name: MountName::new("Archive")?,
+                root_path: archive_root.clone(),
+                mode: MountMode::ReadWrite,
+                audience: Audience::Shared,
+                description: None,
+                hide_globs: vec![],
+                deny_read_globs: vec![],
+                deny_write_globs: vec![],
+                max_read_bytes: None,
+                max_write_bytes: None,
+            })
+            .await?;
+
+        let notes = MountPath::parse("VaultKB:/notes")?;
+        let _ = client.mkdir(&notes).await?;
+        let file = MountPath::parse("VaultKB:/notes/rust.md")?;
+        let content = b"---\nsummary: rust note\n---\nrust async patterns\n";
+        let _ = client.write_bytes(&file, content.to_vec()).await?;
+        let index = MountPath::parse("VaultKB:/notes/index.md")?;
+        let _ = client
+            .write_bytes(&index, b"---\nsummary: rust note\n---\nindex\n".to_vec())
+            .await?;
+
+        let listed = client.ls(&notes, Some(true)).await?;
+        assert!(listed.entries.iter().any(|entry| entry.name == "rust.md"));
+        assert!(listed.entries.iter().any(|entry| entry.name == "index.md"));
+        let tree = client
+            .tree(&MountPath::parse("VaultKB:/")?, Some(4))
+            .await?;
+        assert!(!tree.tree.children.is_empty());
+
+        let stat = client.stat(&file).await?;
+        assert_eq!(stat.memo_summary, None);
+        let index_stat = client.stat(&index).await?;
+        assert_eq!(index_stat.memo_summary.as_deref(), Some("rust note"));
+
+        let raw = client.read(&file).await?;
+        assert_eq!(raw, content);
+
+        let moved = MountPath::parse("VaultKB:/notes/rust-moved.md")?;
+        let _ = client.mv(&file, &moved).await?;
+
+        let copied = MountPath::parse("Archive:/copies/rust-copy.md")?;
+        let _ = client.cp(&moved, &copied).await?;
+
+        let grep = client
+            .grep(
+                &MountPath::parse("VaultKB:/")?,
+                "rust",
+                Some(true),
+                Some(true),
+                Some(10),
+            )
+            .await?;
+        assert!(!grep.matches.is_empty());
+
+        let found = client
+            .find(&MountPath::parse("Archive:/")?, "*.md", Some(10))
+            .await?;
+        assert!(!found.results.is_empty());
+
+        let non_empty = MountPath::parse("VaultKB:/dir")?;
+        let child = MountPath::parse("VaultKB:/dir/a.txt")?;
+        let _ = client.mkdir(&non_empty).await?;
+        let _ = client.write_bytes(&child, b"x".to_vec()).await?;
+        let conflict = client.rm(&non_empty, Some(false)).await;
+        assert!(matches!(
+            conflict,
+            Err(MemoClientError::Api(ApiError::Conflict(_)))
+        ));
+        let _ = client.rm(&non_empty, Some(true)).await?;
+
+        let big = vec![b'a'; 5 * 1024 * 1024];
+        let big_path = MountPath::parse("VaultKB:/notes/big.bin")?;
+        let _ = client.write_bytes(&big_path, big.clone()).await?;
+        let stream_response = client.read_response(&big_path).await?;
+        let streamed = stream_response.bytes().await?;
+        assert_eq!(streamed.len(), big.len());
+
+        let _ = client.rm(&moved, Some(false)).await?;
+        let _ = client.rm(&copied, Some(false)).await?;
+        let _ = client.rm(&notes, Some(true)).await?;
 
         let _ = shutdown_tx.send(());
         handle.await??;
