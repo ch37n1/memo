@@ -12,3 +12,9 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+memo-core = { path = "../memo-core" }
+sqlx.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true

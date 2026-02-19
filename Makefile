@@ -1,6 +1,7 @@
 export PATH := /opt/homebrew/opt/llvm/bin:$(HOME)/.cargo/bin:$(PATH)
 export LLVM_COV ?= $(shell command -v llvm-cov 2>/dev/null || echo /opt/homebrew/opt/llvm/bin/llvm-cov)
 export LLVM_PROFDATA ?= $(shell command -v llvm-profdata 2>/dev/null || echo /opt/homebrew/opt/llvm/bin/llvm-profdata)
+COVERAGE_BUILD_JOBS ?= 1
 
 .PHONY: build test lint fmt fmt-check coverage check dev setup
 
@@ -25,7 +26,7 @@ coverage:
 		echo "Install with: cargo install cargo-llvm-cov"; \
 		exit 1; \
 	}
-	cargo llvm-cov --all --fail-under-lines 80
+	CARGO_BUILD_JOBS=$(COVERAGE_BUILD_JOBS) cargo llvm-cov --all --fail-under-lines 80
 
 check: fmt-check lint test coverage
 
