@@ -17,11 +17,11 @@ Each item is a complete feature that requires its own implementation plan.
 
 - Phase 0: **DONE**
 - Phase 1: **DONE**
-- Phase 2: **IN PROGRESS**
+- Phase 2: **DONE**
 - Stream B: **B1 DONE** (`memo-client`)
 - Stream B: **B2 DONE** (`memo` CLI scaffolding + daemon commands)
 - Stream A: **A1 DONE** (`memod` database layer)
-- Stream A: **A2 pending/in progress** (`Access Control BC`)
+- Stream A: **A2 DONE** (`Access Control BC`)
 
 ---
 
@@ -157,11 +157,11 @@ graph TD
 
 ---
 
-## Phase 2 — Authentication
+## Phase 2 — Authentication -- **DONE**
 
 > A builds the auth system. B builds the CLI shell that will host all future commands.
 
-### A2: Access Control BC
+### A2: Access Control BC -- **DONE**
 
 **Scope:** Token storage, hash verification, bootstrap flow, auth middleware, and the token management API.
 

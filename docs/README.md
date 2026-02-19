@@ -31,11 +31,13 @@ MVP — single-user personal tool. One human operator, one or more LLM agents, a
 ### Implementation Status
 
 - Phase 0 (foundation) is complete.
+- Phase 1 (core infrastructure) is complete.
+- Phase 2 (authentication) is complete.
 - Stream A, A1 (`memod` database layer) is complete.
+- Stream A, A2 (`Access Control BC`) is complete.
 - Stream B Phase 1 (`B1: memo-client`) is complete.
 - Stream B Phase 2 (`B2: CLI scaffolding + daemon commands`) is complete.
-- Next active daemon milestone is A2 (authentication and access control).
-- Remaining roadmap items are in progress by stream.
+- Next active milestone is Phase 3 (mount system): A3/B3.
 
 ### Goals (v1)
 
