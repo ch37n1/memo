@@ -73,7 +73,7 @@ One human operator. One or more LLM agents. All on the same machine. No multi-us
 | FR-07 | `..`, absolute paths, and malformed paths are rejected before any filesystem access |
 | FR-08 | Per-mount policy: hide globs, deny-read globs, deny-write globs, max file size |
 | FR-09 | Token-based auth: opaque tokens, stored hashed (Argon2id), scoped per mount and operation |
-| FR-10 | All operations are logged to an audit log (SQLite) |
+| FR-10 | All operations are logged to an append-only audit log file (JSON lines) |
 | FR-11 | CLI produces plain text by default; `--json` flag for structured output |
 | FR-12 | `memo-ui` provides a native macOS desktop application (Tauri v2) for mount and token management |
 | FR-13 | Directory info from `index.md` frontmatter is surfaced via `stat` and `info` commands |

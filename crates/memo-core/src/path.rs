@@ -2,7 +2,7 @@ use std::fmt;
 use std::path::{Component, Path};
 use std::str::FromStr;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::errors::PolicyError;
 use crate::mount::MountName;
@@ -92,7 +92,7 @@ impl<'de> Deserialize<'de> for RelativePath {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MountPath {
     mount: MountName,
     relative: RelativePath,
@@ -144,6 +144,25 @@ impl FromStr for MountPath {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::parse(s)
+    }
+}
+
+impl Serialize for MountPath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for MountPath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let input = String::deserialize(deserializer)?;
+        Self::parse(input).map_err(serde::de::Error::custom)
     }
 }
 
@@ -230,5 +249,19 @@ mod tests {
 
         let invalid = serde_json::from_value::<RelativePath>(json!("../secret"));
         assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn mount_path_serializes_as_protocol_string() {
+        let path = MountPath::parse("VaultKB:/notes/git.md").expect("mount path should parse");
+        let json = serde_json::to_value(path).expect("mount path should serialize");
+        assert_eq!(json, json!("VaultKB:/notes/git.md"));
+    }
+
+    #[test]
+    fn mount_path_deserializes_from_protocol_string() {
+        let path: MountPath = serde_json::from_value(json!("VaultKB:/notes/git.md"))
+            .expect("mount path should deserialize");
+        assert_eq!(path.to_string(), "VaultKB:/notes/git.md");
     }
 }

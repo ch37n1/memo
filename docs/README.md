@@ -32,7 +32,9 @@ MVP — single-user personal tool. One human operator, one or more LLM agents, a
 
 - Phase 0 (foundation) is complete.
 - Stream A, A1 (`memod` database layer) is complete.
+- Stream B Phase 1 (`B1: memo-client`) is complete.
 - Next active daemon milestone is A2 (authentication and access control).
+- Remaining roadmap items are in progress by stream.
 
 ### Goals (v1)
 
@@ -107,6 +109,7 @@ _In future, some agreements can be moved to `operations` if grow to much._
 | `docs/system-design-v1.md` | Detailed v1 design document | Domain truth |
 | `docs/design/README.md` | Domain design index and deep-dive navigation | Domain truth |
 | `docs/design/access-control.md` | Access control logic, invariants, and failure semantics | Domain truth |
+| `docs/design/persistence.md` | SQLite persistence layer design and migration strategy | Domain truth |
 | `docs/design/mount-registry.md` | Mount and policy logic, path-validation boundaries | Domain truth |
 | `docs/design/file-system.md` | File operation semantics, atomicity, and constraints | Domain truth |
 | `docs/design/audit.md` | Audit event model and append-only log behavior | Domain truth |

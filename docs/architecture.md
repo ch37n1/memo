@@ -8,7 +8,9 @@ tags:
 
 ## System Context
 
-`memo` is a local daemon that mediates all filesystem access between clients and the underlying filesystem. No client ever touches the filesystem directly. All access is policy-enforced and authenticated.
+`memo` is designed as a local daemon that mediates all filesystem access between clients and the underlying filesystem. No client ever touches the filesystem directly. All access is policy-enforced and authenticated.
+
+Current implementation status: architecture below is the target v1 runtime design; implementation is in progress by roadmap phase.
 
 ```mermaid
 graph TB
@@ -31,7 +33,7 @@ graph TB
     Daemon -->|"policy-controlled I/O"| FS
 ```
 
-**Key properties:**
+**Target runtime properties:**
 
 - Daemon binds to loopback only (`127.0.0.1`) — no external network surface
 - All clients authenticate with bearer tokens; all operations are scope-checked
