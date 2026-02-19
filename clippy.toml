@@ -1,0 +1,4 @@
+# Minimum Supported Rust Version — keep in sync with rust-toolchain.toml
+# msrv = "1.84.0"  # uncomment once MSRV is stabilized
+
+avoid-breaking-exported-api = false

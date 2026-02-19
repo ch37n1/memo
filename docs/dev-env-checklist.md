@@ -1,23 +1,22 @@
 # Project dev env checklist
 
-- [ ] Chose package manager (uv, bun, go (cli), cargo)
-- [ ] linters (for all main used languages)
-- [ ] formatters (for all main used languages)
+- [x] Chose package manager (uv, bun, go (cli), cargo)
+- [x] linters (for all main used languages)
+- [x] formatters (for all main used languages)
 - [ ] tests
-    - [ ] unit tests
-    - [ ] BDD e2e tests for main use cases 
+    - [x] unit tests (`#[cfg(test)]` stubs in each crate; wired via `cargo test`)
+    - [ ] BDD e2e tests for main use cases
 - [ ] Establish branch strategy (trunk-based vs GitFlow-lite) and naming conventions
 - [ ] Define dependency update policy (cadence, approval rules, automation).
-- [ ] Define standard directory layout (src/, tests/, docs/, scripts/, infra/, etc.)
-- [ ] Add a README with: local setup, runbooks links, test commands, release process
-- [ ] Add a AGENT.md with main info for agents.
-- [ ] Pin runtime versions (e.g., toolchain versions), document upgrade path
-- [ ] Provide “one command” workflows: run, test, lint, format, migrate, seed
-- [ ] Add pre-commit hooks (format, lint, secret scan, quick tests)
-- [ ] Ensure deterministic builds (lockfiles, vendoring policy if relevant)
+- [x] Define standard directory layout (src/, tests/, docs/, scripts/, infra/, etc.)
+- [x] Provide “one command” workflows: run, test, lint, format, migrate, seed . Do it with `Makefile`.
+- [x] Add a README with: local setup, runbooks links, test commands, release process
+- [x] Add a AGENTS.md with main info for agents.
+- [x] Pin runtime versions (e.g., toolchain versions), document upgrade path
+- [x] Add pre-commit hooks (format, lint, secret scan, quick tests)
+- [x] Ensure deterministic builds (lockfiles, vendoring policy if relevant)
 - [ ] Establish local config handling: env template, safe defaults, validation
-- [ ] Processes description in readme.md and agent.md
-
+- [x] Add code coverage calculation and assert to >80%
 
 In future (next month):
 - [ ] Code health

@@ -92,18 +92,21 @@ _In future, some agreements can be moved to `operations` if grow to much._
 
 ---
 
-## Docs Structure
+## Docs Structure (Current)
 
-| Directory | Purpose | Truth type |
-|-----------|---------|------------|
+| Path | Purpose | Truth type |
+|------|---------|------------|
 | `docs/README.md` | Entry point: project overview, docs map | — |
-| `architecture/` | System context, high-level design, data flow, deployment | System truth |
-| `design/` | Per bounded context: responsibilities, flows, decisions (closer to implementation) | Domain truth |
-| `decision-records/` | Numbered records of significant choices with status tracking | Historical truth |
-| `development/` | Local setup, coding guidelines, testing strategy | Procedural truth |
-| `operations/` | Configuration, monitoring, documentation agreements | Operational truth |
-| `references/` | API specs, data model, external links | Lookup material |
-| `archive/` | Deprecated or superseded documents no longer actively maintained | Historical truth |
+| `docs/architecture.md` | Architecture summary and boundaries | System truth |
+| `docs/system-design-v1.md` | Detailed v1 design document | Domain truth |
+| `docs/roadmap-v1.md` | Near-term planning and sequencing | Planning truth |
+| `docs/dev-env-checklist.md` | Local engineering environment checklist | Procedural truth |
+| `docs/operations/task-workflow.md` | Standard task execution workflow | Procedural truth |
+| `docs/operations/parallel-dev.md` | Collaboration guidance for parallel work | Operational truth |
+| `docs/operations/documentation.md` | Documentation conventions and taxonomy | Operational truth |
+| `docs/archive/vision.md` | Historical vision snapshot | Historical truth |
+
+Planned directories (`design/`, `decision-records/`, `development/`, `references/`) will be introduced as content grows.
 
 > Full conventions: [Documentation Agreements](operations/documentation.md)
 
@@ -111,4 +114,13 @@ _In future, some agreements can be moved to `operations` if grow to much._
 
 ## Tooling
 
-_To be added._
+Core project checks:
+- `make fmt-check`
+- `make lint`
+- `make test`
+- `make coverage`
+- `make check` (runs all gates above)
+
+Coverage tooling requirement:
+- Install `cargo-llvm-cov` before running `make coverage` or `make check`:
+  - `cargo install cargo-llvm-cov`
