@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod db;
+pub mod fs;
 pub mod mount_registry;
 
 use std::future::pending;
@@ -13,17 +14,19 @@ use std::sync::Arc;
 
 use auth::middleware::{auth_middleware, AuthState, VerifiedToken};
 use auth::repository::SqliteTokenRepository;
-use axum::extract::{Path, State};
+use axum::body::Body;
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
 use memo_core::repositories::MountRepository;
 use memo_core::repositories::TokenRepository;
-use memo_core::{ApiError, AuthError, DbError, TokenId};
+use memo_core::{ApiError, AuthError, DbError, MountPath, TokenId};
 use mount_registry::repository::{PolicyCache, SqliteMountRepository};
 use serde::Serialize;
+use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -54,6 +57,7 @@ impl AppConfig {
 struct AppState {
     token_repository: Arc<SqliteTokenRepository>,
     mount_repository: Arc<SqliteMountRepository>,
+    file_system_service: Arc<fs::ops::FileSystemService>,
 }
 
 #[derive(Debug, Serialize)]
@@ -164,6 +168,9 @@ async fn run(config: AppConfig) -> Result<(), ApiError> {
     }
 
     let state = AppState {
+        file_system_service: Arc::new(fs::ops::FileSystemService::new(Arc::clone(
+            &mount_repository,
+        ))),
         token_repository,
         mount_repository,
     };
@@ -212,10 +219,31 @@ fn app_router(state: &AppState) -> Router {
         ))
         .with_state(state.clone());
 
+    let fs_routes = Router::new()
+        .route("/v1/fs/ls", get(fs_ls))
+        .route("/v1/fs/tree", get(fs_tree))
+        .route("/v1/fs/stat", get(fs_stat))
+        .route("/v1/fs/read", get(fs_read))
+        .route("/v1/fs/write", put(fs_write))
+        .route("/v1/fs/mkdir", post(fs_mkdir))
+        .route("/v1/fs/mv", post(fs_mv))
+        .route("/v1/fs/rm", delete(fs_rm))
+        .route("/v1/fs/cp", post(fs_cp))
+        .route("/v1/fs/grep", get(fs_grep))
+        .route("/v1/fs/find", get(fs_find))
+        .layer(middleware::from_fn_with_state(
+            AuthState {
+                token_repository: Arc::clone(&state.token_repository),
+            },
+            auth_middleware,
+        ))
+        .with_state(state.clone());
+
     Router::new()
         .route("/health", get(health))
         .merge(token_routes)
         .merge(mount_routes)
+        .merge(fs_routes)
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -375,12 +403,292 @@ fn map_mount_not_found(name: &memo_core::MountName, error: DbError) -> HttpError
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct FsPathQuery {
+    path: MountPath,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FsLsQuery {
+    path: MountPath,
+    #[serde(default)]
+    info: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FsTreeQuery {
+    path: MountPath,
+    #[serde(default)]
+    depth: Option<u8>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FsRmQuery {
+    path: MountPath,
+    #[serde(default)]
+    recursive: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FsMvQuery {
+    src: MountPath,
+    dst: MountPath,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FsCpQuery {
+    src: MountPath,
+    dst: MountPath,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FsGrepQuery {
+    path: MountPath,
+    pattern: String,
+    #[serde(default)]
+    recursive: Option<bool>,
+    #[serde(default)]
+    case_sensitive: Option<bool>,
+    #[serde(default)]
+    max_results: Option<u64>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FsFindQuery {
+    path: MountPath,
+    glob: String,
+    #[serde(default)]
+    max_results: Option<u64>,
+}
+
+async fn fs_ls(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsLsQuery>,
+) -> Result<Json<fs::ops::LsResponse>, HttpError> {
+    if !fs::ops::require_fs_read_scope(&token, query.path.mount()) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    state
+        .file_system_service
+        .ls(&query.path, query.info.unwrap_or(false))
+        .await
+        .map(Json)
+        .map_err(HttpError)
+}
+
+async fn fs_tree(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsTreeQuery>,
+) -> Result<Json<fs::ops::TreeResponse>, HttpError> {
+    if !fs::ops::require_fs_read_scope(&token, query.path.mount()) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    state
+        .file_system_service
+        .tree(&query.path, query.depth)
+        .await
+        .map(Json)
+        .map_err(HttpError)
+}
+
+async fn fs_stat(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsPathQuery>,
+) -> Result<Json<fs::ops::StatResponse>, HttpError> {
+    if !fs::ops::require_fs_read_scope(&token, query.path.mount()) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    state
+        .file_system_service
+        .stat(&query.path)
+        .await
+        .map(Json)
+        .map_err(HttpError)
+}
+
+async fn fs_read(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsPathQuery>,
+) -> Result<Response, HttpError> {
+    if !fs::ops::require_fs_read_scope(&token, query.path.mount()) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    let (resolved, size, mime) = state
+        .file_system_service
+        .read_file_meta(&query.path)
+        .await
+        .map_err(HttpError)?;
+    let content_type = axum::http::HeaderValue::from_str(&mime)
+        .unwrap_or_else(|_| axum::http::HeaderValue::from_static("application/octet-stream"));
+
+    let mut response = if size > 4 * 1024 * 1024 {
+        let file = tokio::fs::File::open(resolved)
+            .await
+            .map_err(|error| HttpError(ApiError::Internal(error.to_string())))?;
+        let stream = ReaderStream::new(file);
+        Body::from_stream(stream).into_response()
+    } else {
+        let bytes = tokio::fs::read(resolved)
+            .await
+            .map_err(|error| HttpError(ApiError::Internal(error.to_string())))?;
+        bytes.into_response()
+    };
+
+    response
+        .headers_mut()
+        .insert(axum::http::header::CONTENT_TYPE, content_type);
+    Ok(response)
+}
+
+async fn fs_write(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsPathQuery>,
+    body: Body,
+) -> Result<Json<fs::ops::WriteResponse>, HttpError> {
+    if !fs::ops::require_fs_write_scope(&token, query.path.mount()) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    let bytes = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .map_err(|error| HttpError(ApiError::Internal(error.to_string())))?;
+
+    state
+        .file_system_service
+        .write_file(&query.path, &bytes)
+        .await
+        .map(Json)
+        .map_err(HttpError)
+}
+
+async fn fs_mkdir(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsPathQuery>,
+) -> Result<Json<fs::ops::MkdirResponse>, HttpError> {
+    if !fs::ops::require_fs_write_scope(&token, query.path.mount()) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    state
+        .file_system_service
+        .mkdir(&query.path)
+        .await
+        .map(Json)
+        .map_err(HttpError)
+}
+
+async fn fs_mv(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsMvQuery>,
+) -> Result<Json<fs::ops::MoveResponse>, HttpError> {
+    if !fs::ops::require_fs_write_scope(&token, query.src.mount())
+        || !fs::ops::require_fs_write_scope(&token, query.dst.mount())
+    {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    state
+        .file_system_service
+        .mv(&query.src, &query.dst)
+        .await
+        .map(Json)
+        .map_err(HttpError)
+}
+
+async fn fs_rm(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsRmQuery>,
+) -> Result<Json<fs::ops::RemoveResponse>, HttpError> {
+    if !fs::ops::require_fs_write_scope(&token, query.path.mount()) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    state
+        .file_system_service
+        .rm(&query.path, query.recursive.unwrap_or(false))
+        .await
+        .map(Json)
+        .map_err(HttpError)
+}
+
+async fn fs_cp(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsCpQuery>,
+) -> Result<Json<fs::ops::CopyResponse>, HttpError> {
+    if !fs::ops::require_fs_read_scope(&token, query.src.mount())
+        || !fs::ops::require_fs_write_scope(&token, query.dst.mount())
+    {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    state
+        .file_system_service
+        .cp(&query.src, &query.dst)
+        .await
+        .map(Json)
+        .map_err(HttpError)
+}
+
+async fn fs_grep(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsGrepQuery>,
+) -> Result<Json<fs::ops::GrepResponse>, HttpError> {
+    if !fs::ops::require_fs_read_scope(&token, query.path.mount()) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    state
+        .file_system_service
+        .grep(
+            &query.path,
+            &query.pattern,
+            query.recursive.unwrap_or(true),
+            query.case_sensitive.unwrap_or(true),
+            query.max_results.unwrap_or(100),
+        )
+        .await
+        .map(Json)
+        .map_err(HttpError)
+}
+
+async fn fs_find(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsFindQuery>,
+) -> Result<Json<fs::ops::FindResponse>, HttpError> {
+    if !fs::ops::require_fs_read_scope(&token, query.path.mount()) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    state
+        .file_system_service
+        .find(&query.path, &query.glob, query.max_results.unwrap_or(100))
+        .await
+        .map(Json)
+        .map_err(HttpError)
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error;
     use std::io::Write;
 
-    use memo_client::{MemoClient, MemoClientConfig};
+    use memo_client::{CreateMountRequest, MemoClient, MemoClientConfig, MemoClientError};
+    use memo_core::{ApiError, Audience, MountMode, MountName, MountPath};
     use tempfile::tempdir;
 
     use super::app_router;
@@ -403,6 +711,9 @@ mod tests {
         let mount_repository =
             std::sync::Arc::new(SqliteMountRepository::new(pool, PolicyCache::new()));
         let state = super::AppState {
+            file_system_service: std::sync::Arc::new(crate::fs::ops::FileSystemService::new(
+                std::sync::Arc::clone(&mount_repository),
+            )),
             token_repository,
             mount_repository,
         };
@@ -438,6 +749,167 @@ mod tests {
 
         let tokens = client.list_tokens().await?;
         assert!(!tokens.is_empty());
+
+        let _ = shutdown_tx.send(());
+        handle.await??;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn filesystem_endpoints_round_trip() -> Result<(), Box<dyn Error>> {
+        let tempdir = tempdir()?;
+        let db_path = tempdir.path().join("memo.db");
+        let db_url = format!("sqlite://{}", db_path.display());
+        let bootstrap_path = tempdir.path().join("bootstrap.token");
+        let mount_root = tempdir.path().join("vault");
+        let archive_root = tempdir.path().join("archive");
+        std::fs::create_dir_all(&mount_root)?;
+        std::fs::create_dir_all(&archive_root)?;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+
+        let pool = init_pool(&DbConfig::new(db_url.clone())).await?;
+        let token_repository = std::sync::Arc::new(SqliteTokenRepository::new(pool.clone()));
+        let mount_repository =
+            std::sync::Arc::new(SqliteMountRepository::new(pool, PolicyCache::new()));
+        let state = super::AppState {
+            file_system_service: std::sync::Arc::new(crate::fs::ops::FileSystemService::new(
+                std::sync::Arc::clone(&mount_repository),
+            )),
+            token_repository,
+            mount_repository,
+        };
+
+        if crate::auth::bootstrap_admin_token_if_needed(&state.token_repository, &bootstrap_path)
+            .await?
+            .is_some()
+        {
+            let mut stderr = std::io::stderr();
+            let _ = writeln!(
+                stderr,
+                "bootstrap token written to {}",
+                bootstrap_path.display()
+            );
+        }
+
+        let app = app_router(&state);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = tokio::spawn(super::serve(listener, app, async {
+            let _ = shutdown_rx.await;
+        }));
+
+        let token = tokio::fs::read_to_string(&bootstrap_path)
+            .await?
+            .trim()
+            .to_owned();
+
+        let client = MemoClient::new(MemoClientConfig {
+            base_url: format!("http://{addr}"),
+            token: Some(token),
+            ..MemoClientConfig::default()
+        })?;
+
+        let _ = client
+            .create_mount(&CreateMountRequest {
+                name: MountName::new("VaultKB")?,
+                root_path: mount_root.clone(),
+                mode: MountMode::ReadWrite,
+                audience: Audience::Shared,
+                description: Some("kb".to_owned()),
+                hide_globs: vec![],
+                deny_read_globs: vec![],
+                deny_write_globs: vec![],
+                max_read_bytes: None,
+                max_write_bytes: None,
+            })
+            .await?;
+        let _ = client
+            .create_mount(&CreateMountRequest {
+                name: MountName::new("Archive")?,
+                root_path: archive_root.clone(),
+                mode: MountMode::ReadWrite,
+                audience: Audience::Shared,
+                description: None,
+                hide_globs: vec![],
+                deny_read_globs: vec![],
+                deny_write_globs: vec![],
+                max_read_bytes: None,
+                max_write_bytes: None,
+            })
+            .await?;
+
+        let notes = MountPath::parse("VaultKB:/notes")?;
+        let _ = client.mkdir(&notes).await?;
+        let file = MountPath::parse("VaultKB:/notes/rust.md")?;
+        let content = b"---\nsummary: rust note\n---\nrust async patterns\n";
+        let _ = client.write_bytes(&file, content.to_vec()).await?;
+        let index = MountPath::parse("VaultKB:/notes/index.md")?;
+        let _ = client
+            .write_bytes(&index, b"---\nsummary: rust note\n---\nindex\n".to_vec())
+            .await?;
+
+        let listed = client.ls(&notes, Some(true)).await?;
+        assert!(listed.entries.iter().any(|entry| entry.name == "rust.md"));
+        assert!(listed.entries.iter().any(|entry| entry.name == "index.md"));
+        let tree = client
+            .tree(&MountPath::parse("VaultKB:/")?, Some(4))
+            .await?;
+        assert!(!tree.tree.children.is_empty());
+
+        let stat = client.stat(&file).await?;
+        assert_eq!(stat.memo_summary, None);
+        let index_stat = client.stat(&index).await?;
+        assert_eq!(index_stat.memo_summary.as_deref(), Some("rust note"));
+
+        let raw = client.read(&file).await?;
+        assert_eq!(raw, content);
+
+        let moved = MountPath::parse("VaultKB:/notes/rust-moved.md")?;
+        let _ = client.mv(&file, &moved).await?;
+
+        let copied = MountPath::parse("Archive:/copies/rust-copy.md")?;
+        let _ = client.cp(&moved, &copied).await?;
+
+        let grep = client
+            .grep(
+                &MountPath::parse("VaultKB:/")?,
+                "rust",
+                Some(true),
+                Some(true),
+                Some(10),
+            )
+            .await?;
+        assert!(!grep.matches.is_empty());
+
+        let found = client
+            .find(&MountPath::parse("Archive:/")?, "*.md", Some(10))
+            .await?;
+        assert!(!found.results.is_empty());
+
+        let non_empty = MountPath::parse("VaultKB:/dir")?;
+        let child = MountPath::parse("VaultKB:/dir/a.txt")?;
+        let _ = client.mkdir(&non_empty).await?;
+        let _ = client.write_bytes(&child, b"x".to_vec()).await?;
+        let conflict = client.rm(&non_empty, Some(false)).await;
+        assert!(matches!(
+            conflict,
+            Err(MemoClientError::Api(ApiError::Conflict(_)))
+        ));
+        let _ = client.rm(&non_empty, Some(true)).await?;
+
+        let big = vec![b'a'; 5 * 1024 * 1024];
+        let big_path = MountPath::parse("VaultKB:/notes/big.bin")?;
+        let _ = client.write_bytes(&big_path, big.clone()).await?;
+        let stream_response = client.read_response(&big_path).await?;
+        let streamed = stream_response.bytes().await?;
+        assert_eq!(streamed.len(), big.len());
+
+        let _ = client.rm(&moved, Some(false)).await?;
+        let _ = client.rm(&copied, Some(false)).await?;
+        let _ = client.rm(&notes, Some(true)).await?;
 
         let _ = shutdown_tx.send(());
         handle.await??;

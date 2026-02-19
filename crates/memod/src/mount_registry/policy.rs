@@ -87,14 +87,19 @@ impl PolicyEngine {
 
         let lexical_path = mount.resolve(relative);
         let parent = lexical_path.parent().ok_or(PolicyError::InvalidPath)?;
-        let canonical_parent = parent
-            .canonicalize()
-            .map_err(|_| PolicyError::InvalidPath)?;
         let root_canonical = &compiled.root_path_canonical;
         let relative_parent = Path::new(relative.as_str())
             .parent()
             .unwrap_or_else(|| Path::new(""));
         let normalized_parent = normalize_parent_path(root_canonical, relative_parent);
+        let canonical_parent = if parent.exists() {
+            parent
+                .canonicalize()
+                .map_err(|_| PolicyError::InvalidPath)?
+        } else {
+            validate_existing_parent_segments(root_canonical, relative_parent)?;
+            normalized_parent.clone()
+        };
 
         if !canonical_parent.starts_with(root_canonical) {
             return Err(PolicyError::OutOfBounds);
@@ -135,6 +140,36 @@ fn normalize_joined_path(root_canonical: &Path, relative: &RelativePath) -> Path
 
 fn normalize_parent_path(root_canonical: &Path, relative_parent: &Path) -> PathBuf {
     normalize_path(&root_canonical.join(relative_parent))
+}
+
+fn validate_existing_parent_segments(
+    root_canonical: &Path,
+    relative_parent: &Path,
+) -> Result<(), PolicyError> {
+    let mut current = root_canonical.to_path_buf();
+    for component in relative_parent.components() {
+        if let Component::Normal(segment) = component {
+            current.push(segment);
+            if !current.exists() {
+                break;
+            }
+
+            let metadata =
+                std::fs::symlink_metadata(&current).map_err(|_| PolicyError::InvalidPath)?;
+            if metadata.file_type().is_symlink() {
+                return Err(PolicyError::SymlinkDenied);
+            }
+
+            let canonical = current
+                .canonicalize()
+                .map_err(|_| PolicyError::InvalidPath)?;
+            if !canonical.starts_with(root_canonical) {
+                return Err(PolicyError::OutOfBounds);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -212,6 +247,28 @@ mod tests {
 
         let result = engine.resolve_write_path(&mount, &RelativePath::root(), 1);
         assert_eq!(result, Err(PolicyError::InvalidPath));
+        Ok(())
+    }
+
+    #[test]
+    fn write_path_allows_missing_parent_directories() -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempdir()?;
+        let root = tempdir.path().join("vault");
+        std::fs::create_dir_all(&root)?;
+
+        let mount = Mount::new(
+            MountName::new("VaultKB")?,
+            root.clone(),
+            MountMode::ReadWrite,
+            Audience::Shared,
+            None,
+            MountPolicy::default(),
+            OffsetDateTime::now_utc(),
+        )?;
+        let engine = PolicyEngine::new(PolicyCache::new());
+
+        let resolved = engine.resolve_write_path(&mount, &RelativePath::new("notes/new.md")?, 1)?;
+        assert!(resolved.ends_with("vault/notes/new.md"));
         Ok(())
     }
 

@@ -23,6 +23,9 @@ serde_json.workspace = true
 sqlx.workspace = true
 time.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
+regex.workspace = true
+walkdir.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
