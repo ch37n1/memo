@@ -34,14 +34,16 @@ MVP — single-user personal tool. One human operator, one or more LLM agents, a
 - Phase 1 (core infrastructure) is complete.
 - Phase 2 (authentication) is complete.
 - Phase 3 (mount system) is complete.
+- Phase 4 (file operations) is complete.
 - Stream A, A1 (`memod` database layer) is complete.
 - Stream A, A2 (`Access Control BC`) is complete.
 - Stream A, A3 (`Mount Registry BC`) is complete.
+- Stream A, A4 (`File System BC`) is complete.
 - Stream B Phase 1 (`B1: memo-client`) is complete.
 - Stream B Phase 2 (`B2: CLI scaffolding + daemon commands`) is complete.
 - Stream B Phase 3 (`B3: CLI admin commands`) is complete.
 - Stream B Phase 4 (`B4: CLI filesystem commands`) is complete.
-- Next active milestones are Stream A A4 (`File System BC`) and Stream B B5 (`Integration & Security Tests`).
+- Next active milestones are Stream A A5 (`Audit BC + Daemon Lifecycle`) and Stream B B5 (`Integration & Security Tests`).
 
 ### Goals (v1)
 

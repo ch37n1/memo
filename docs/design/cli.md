@@ -71,6 +71,28 @@ Global flags are available across subcommands:
 - `memo token revoke <token-id>`
 - `memo audit [--mount --token-id --operation --result --limit --before --after]`
 
+## Filesystem Commands (Phase 4 / B4)
+
+- `memo ls <path> [--info]`
+- `memo tree <path> [--depth N]`
+- `memo cat <path>`
+- `memo write <path> [--file <local-path>]`
+- `memo mkdir <path>`
+- `memo mv <src> <dst>`
+- `memo rm <path> [--recursive]`
+- `memo cp <src> <dst>`
+  - supports daemon mount-to-mount copy
+  - supports local file to mount copy
+- `memo grep <path> <pattern> [--no-recursive] [--case-insensitive] [--max-results N]`
+- `memo find <path> <glob> [--max-results N]`
+- `memo info <path>`
+
+Path handling for filesystem commands:
+
+- accepts full mount path (`MountName:/relative/path`)
+- accepts relative path when global `--mount <name>` is set
+- all path authorization and safety checks are delegated to daemon policy validation
+
 ## Output Modes
 
 - Default mode: human-readable plain text

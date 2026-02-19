@@ -23,6 +23,31 @@ Request path for filesystem operations:
 5. emit domain event
 6. append audit record
 
+## Current Implementation (Phase 4 / A4)
+
+Implemented in `memod` as `FileSystemService` with HTTP handlers under `/v1/fs/*`.
+
+Covered operations:
+
+- `ls`
+- `tree`
+- `stat`
+- `read`
+- `write`
+- `mkdir`
+- `mv`
+- `rm`
+- `cp`
+- `grep`
+- `find`
+
+Implementation notes:
+
+- reads are validated by mount policy before filesystem access
+- writes use atomic write-by-rename and cleanup temp files on failure
+- copy enforces source-read and destination-write checks independently
+- recursive and result-limit behavior is handled by operation-specific parameters (`tree`, `rm`, `grep`, `find`)
+
 ## Operation Guarantees
 
 - Read operations are constrained to validated mount roots.

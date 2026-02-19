@@ -19,6 +19,7 @@ Each item is a complete feature that requires its own implementation plan.
 - Phase 1: **DONE**
 - Phase 2: **DONE**
 - Phase 3: **DONE**
+- Phase 4: **DONE**
 - Stream B: **B1 DONE** (`memo-client`)
 - Stream B: **B2 DONE** (`memo` CLI scaffolding + daemon commands)
 - Stream B: **B3 DONE** (`memo` CLI admin commands)
@@ -26,6 +27,7 @@ Each item is a complete feature that requires its own implementation plan.
 - Stream A: **A1 DONE** (`memod` database layer)
 - Stream A: **A2 DONE** (`Access Control BC`)
 - Stream A: **A3 DONE** (`Mount Registry BC`)
+- Stream A: **A4 DONE** (`File System BC`)
 
 ---
 
@@ -257,11 +259,11 @@ graph TD
 
 ---
 
-## Phase 4 — File Operations
+## Phase 4 — File Operations -- **DONE**
 
 > A builds all filesystem operations. B adds the corresponding CLI commands.
 
-### A4: File System BC
+### A4: File System BC -- **DONE**
 
 **Scope:** All file I/O operations, atomic writes, text search, glob search, and their HTTP endpoints.
 
@@ -286,6 +288,8 @@ graph TD
 - Integration tests: ls empty dir, read/write round-trip, overwrite existing, mkdir, mv, rm non-empty without recursive (expect error), cp within mount, atomic write interrupted (temp file cleanup), concurrent writes to same path
 
 **Depends on:** A3 (policy engine needed to validate paths before any operation)
+
+**Status:** Completed in stream `a`.
 
 ---
 
