@@ -20,6 +20,7 @@ Each item is a complete feature that requires its own implementation plan.
 - Phase 2: **DONE**
 - Stream B: **B1 DONE** (`memo-client`)
 - Stream B: **B2 DONE** (`memo` CLI scaffolding + daemon commands)
+- Stream B: **B3 DONE** (`memo` CLI admin commands)
 - Stream A: **A1 DONE** (`memod` database layer)
 - Stream A: **A2 DONE** (`Access Control BC`)
 
@@ -79,9 +80,6 @@ graph TD
     style B1 fill:#dcfce7,stroke:#16a34a
     style B2 fill:#dcfce7,stroke:#16a34a
     style B3 fill:#dcfce7,stroke:#16a34a
-    style B4 fill:#dcfce7,stroke:#16a34a
-    style B5 fill:#dcfce7,stroke:#16a34a
-    style B6 fill:#dcfce7,stroke:#16a34a
 ```
 
 **Sync point:** Stream B's integration tests (B5) require the daemon to be feature-complete through A4. By the phased structure, A is already on A5 when B reaches B5, so this is naturally satisfied.
@@ -237,7 +235,7 @@ graph TD
 
 ---
 
-### B3: CLI Admin Commands
+### B3: CLI Admin Commands -- **DONE**
 
 **Scope:** Mount management, token management, and audit log viewing from the CLI.
 
@@ -250,6 +248,8 @@ graph TD
 - Proper exit codes: 0 success, 1 general error, 2 auth, 3 permission, 4 not found, 5 daemon unreachable
 
 **Depends on:** B2 (CLI scaffolding)
+
+**Status:** Completed in stream `b`.
 
 ---
 

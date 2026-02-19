@@ -1370,6 +1370,7 @@ memo mount remove VaultKB
 memo mount show VaultKB
 memo mount update VaultKB --mode ro
 memo mount update VaultKB --hide-glob ".obsidian/**" --max-write-bytes 5242880
+memo mount update VaultKB --clear-hide-globs --clear-max-write-bytes
 
 # Token management
 memo token list
@@ -1389,6 +1390,10 @@ memo daemon stop
 memo daemon status
 memo daemon logs --tail 50
 ```
+
+Notes:
+- In plain mode, `memo token create` prints the raw token value once so it can be copied immediately.
+- `memo mount add` and `memo mount update` accept repeated or comma-separated glob values for `--hide-glob`, `--deny-read-glob`, and `--deny-write-glob`.
 
 ---
 

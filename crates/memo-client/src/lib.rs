@@ -6,8 +6,8 @@ pub use types::{
     AuditEntry, AuditQuery, AuditResponse, AuditResult, CopyResponse, CreateMountRequest,
     CreateTokenRequest, CreatedToken, FindResponse, FindResult, FsEntry, FsEntryKind, GrepMatch,
     GrepResponse, HealthResponse, LsResponse, MkdirResponse, MountListResponse, MoveResponse,
-    RemoveMountResponse, RemoveResponse, RevokeTokenResponse, StatResponse, TokenListResponse,
-    TreeNode, TreeResponse, UpdateMountRequest, WriteResponse,
+    PatchValue, RemoveMountResponse, RemoveResponse, RevokeTokenResponse, StatResponse,
+    TokenListResponse, TreeNode, TreeResponse, UpdateMountRequest, WriteResponse,
 };
 
 use std::time::Duration;
@@ -690,7 +690,7 @@ mod tests {
 
     use super::{
         map_status_fallback, AuditQuery, CreateTokenRequest, MemoClient, MemoClientConfig,
-        MemoClientError,
+        MemoClientError, PatchValue, UpdateMountRequest,
     };
 
     fn fixture_ts() -> Value {
@@ -987,6 +987,23 @@ mod tests {
     }
 
     #[test]
+    fn update_mount_request_serializes_null_for_clears() {
+        let request = UpdateMountRequest {
+            description: Some(PatchValue::Null),
+            max_read_bytes: Some(PatchValue::Null),
+            ..UpdateMountRequest::default()
+        };
+
+        let json = serde_json::to_value(request).expect("request should serialize");
+        assert!(json
+            .get("description")
+            .is_some_and(serde_json::Value::is_null));
+        assert!(json
+            .get("max_read_bytes")
+            .is_some_and(serde_json::Value::is_null));
+    }
+
+    #[test]
     fn mount_path_query_serializes_to_protocol_string() {
         let path = MountPath::parse("VaultKB:/notes/git.md").expect("path should parse");
         let json = serde_json::to_string(&serde_json::json!({ "path": path }))
@@ -1153,7 +1170,7 @@ mod tests {
             .update_mount(
                 &mount_name,
                 &super::UpdateMountRequest {
-                    description: Some("updated".to_owned()),
+                    description: Some(PatchValue::Value("updated".to_owned())),
                     ..super::UpdateMountRequest::default()
                 },
             )
