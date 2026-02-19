@@ -17,6 +17,13 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: make-check
+        name: make check
+        description: Run full quality gate
+        entry: make check
+        language: system
+        pass_filenames: false
+
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.21.2
     hooks:
