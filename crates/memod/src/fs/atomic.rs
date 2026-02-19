@@ -46,14 +46,30 @@ pub async fn atomic_write_bytes(
         let mut temp_file = tokio::fs::File::create(&temp_path).await?;
         temp_file.write_all(bytes).await?;
         if options.fsync {
-            temp_file.sync_all().await?;
+            if let Err(error) = temp_file.sync_all().await {
+                if !is_non_fatal_sync_error(&error) {
+                    return Err(error);
+                }
+            }
         }
         temp_file.flush().await?;
         drop(temp_file);
         tokio::fs::rename(&temp_path, target).await?;
         if options.dir_sync {
-            let dir = tokio::fs::File::open(parent).await?;
-            dir.sync_all().await?;
+            match tokio::fs::File::open(parent).await {
+                Ok(dir) => {
+                    if let Err(error) = dir.sync_all().await {
+                        if !is_non_fatal_sync_error(&error) {
+                            return Err(error);
+                        }
+                    }
+                }
+                Err(error) => {
+                    if !is_non_fatal_sync_error(&error) {
+                        return Err(error);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -64,6 +80,15 @@ pub async fn atomic_write_bytes(
     }
 
     write_result
+}
+
+fn is_non_fatal_sync_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied
+            | std::io::ErrorKind::Unsupported
+            | std::io::ErrorKind::InvalidInput
+    )
 }
 
 #[cfg(test)]
@@ -82,5 +107,20 @@ mod tests {
         assert_eq!(content, "hello");
 
         Ok(())
+    }
+
+    #[test]
+    fn treats_selected_sync_errors_as_non_fatal() {
+        let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "perm");
+        assert!(super::is_non_fatal_sync_error(&err));
+
+        let err = std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported");
+        assert!(super::is_non_fatal_sync_error(&err));
+
+        let err = std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid");
+        assert!(super::is_non_fatal_sync_error(&err));
+
+        let err = std::io::Error::other("other");
+        assert!(!super::is_non_fatal_sync_error(&err));
     }
 }

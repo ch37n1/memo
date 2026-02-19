@@ -86,12 +86,20 @@ impl AppConfig {
             .and_then(|daemon| daemon.write.as_ref())
             .and_then(|write| write.fsync)
             .unwrap_or(true);
+        let write_fsync = std::env::var("MEMOD_WRITE_FSYNC")
+            .ok()
+            .and_then(|raw| raw.parse::<bool>().ok())
+            .unwrap_or(write_fsync);
         let write_dir_sync = from_file
             .daemon
             .as_ref()
             .and_then(|daemon| daemon.write.as_ref())
             .and_then(|write| write.dir_sync)
             .unwrap_or(true);
+        let write_dir_sync = std::env::var("MEMOD_WRITE_DIR_SYNC")
+            .ok()
+            .and_then(|raw| raw.parse::<bool>().ok())
+            .unwrap_or(write_dir_sync);
 
         Self {
             bind_addr,

@@ -1,0 +1,170 @@
+:root {
+  --bg: radial-gradient(1200px 500px at 5% -20%, #f4ffd4 0%, transparent 55%), radial-gradient(1000px 420px at 90% 120%, #ffe5c3 0%, transparent 60%), #f8f7f2;
+  --panel: #fffdfa;
+  --ink: #20201e;
+  --muted: #6b6a64;
+  --line: #d9d6ce;
+  --accent: #1f6a54;
+  --danger: #aa2f2f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Avenir Next", "Gill Sans", "Trebuchet MS", sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+}
+
+.app {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.header h1 {
+  margin: 0;
+  letter-spacing: 0.04em;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+  box-shadow: 0 5px 22px rgba(0, 0, 0, 0.05);
+}
+
+.card h2 {
+  margin: 0 0 10px;
+  font-size: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.mounts,
+.tokens,
+.audit,
+.browser {
+  grid-column: span 6;
+}
+
+.audit,
+.browser {
+  grid-column: span 12;
+}
+
+input,
+select,
+button,
+textarea {
+  font: inherit;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px;
+  background: #fff;
+}
+
+button {
+  border: 1px solid var(--ink);
+  border-radius: 8px;
+  background: var(--ink);
+  color: #fff;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+button.secondary {
+  background: transparent;
+  color: var(--ink);
+}
+
+button.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+}
+
+.table th,
+.table td {
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  padding: 6px;
+  vertical-align: top;
+}
+
+.mono {
+  font-family: "IBM Plex Mono", "Menlo", "Monaco", monospace;
+  font-size: 0.86rem;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.badge {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 8px;
+  display: inline-block;
+  margin-right: 6px;
+  margin-bottom: 4px;
+  font-size: 0.78rem;
+}
+
+.token-setup {
+  max-width: 640px;
+  margin: 64px auto;
+}
+
+.message {
+  margin-top: 8px;
+  color: var(--accent);
+}
+
+.error {
+  color: var(--danger);
+}
+
+@media (max-width: 900px) {
+  .mounts,
+  .tokens,
+  .audit,
+  .browser {
+    grid-column: span 12;
+  }
+}

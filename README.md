@@ -39,6 +39,58 @@ make build
 
 ---
 
+## Quick Start (0 -> Mounted Folder for CLI)
+
+This flow starts `memod`, creates one mount, and verifies CLI read/write through the daemon.
+
+### 1. Start daemon (terminal A)
+
+```bash
+cd memo
+./scripts/dev.sh
+```
+
+On first start, `memod` writes a bootstrap admin token to:
+`~/.config/memo/bootstrap.token`
+
+### 2. Export token and create a mount (terminal B)
+
+```bash
+cd memo
+export MEMO_TOKEN="$(cat ~/.config/memo/bootstrap.token)"
+
+# Create a real folder to back the mount
+mkdir -p ~/memo-vault
+
+# Register mount in daemon
+cargo run -q -p memo -- mount add \
+  --name VaultKB \
+  --path "$HOME/memo-vault" \
+  --mode read_write \
+  --audience shared
+```
+
+### 3. Use the mount via CLI
+
+```bash
+# Write a file
+echo "hello from memo" | cargo run -q -p memo -- write VaultKB:/notes/hello.md
+
+# Read it back
+cargo run -q -p memo -- cat VaultKB:/notes/hello.md
+
+# List folder
+cargo run -q -p memo -- ls VaultKB:/notes
+```
+
+Optional quality check:
+
+```bash
+make check
+```
+
+---
+
 ## Commands
 
 | Command | Description |

@@ -41,6 +41,8 @@ impl TestDaemon {
             .env("MEMOD_BIND_ADDR", &bind_addr)
             .env("MEMOD_DATABASE_URL", &db_url)
             .env("MEMOD_BOOTSTRAP_TOKEN_PATH", &bootstrap_path)
+            .env("MEMOD_WRITE_FSYNC", "false")
+            .env("MEMOD_WRITE_DIR_SYNC", "false")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()?;

@@ -21,6 +21,7 @@ Each item is a complete feature that requires its own implementation plan.
 - Phase 3: **DONE**
 - Phase 4: **DONE**
 - Phase 5: **DONE**
+- Phase 6: **DONE**
 - Stream B: **B1 DONE** (`memo-client`)
 - Stream B: **B2 DONE** (`memo` CLI scaffolding + daemon commands)
 - Stream B: **B3 DONE** (`memo` CLI admin commands)
@@ -31,6 +32,8 @@ Each item is a complete feature that requires its own implementation plan.
 - Stream A: **A3 DONE** (`Mount Registry BC`)
 - Stream A: **A4 DONE** (`File System BC`)
 - Stream A: **A5 DONE** (`Audit BC + Daemon Lifecycle`)
+- Stream A: **A6 DONE** (`Hardening`)
+- Stream B: **B6 DONE** (`memo-ui Desktop App`)
 
 ---
 
@@ -379,11 +382,11 @@ graph TD
 
 ---
 
-## Phase 6 — Desktop App & Hardening
+## Phase 6 — Desktop App & Hardening -- **DONE**
 
 > A addresses issues found during integration testing. B builds the desktop admin UI.
 
-### A6: Hardening
+### A6: Hardening -- **DONE**
 
 **Scope:** Bug fixes, edge cases, performance, and documentation catch-up.
 
@@ -401,7 +404,7 @@ graph TD
 
 ---
 
-### B6: memo-ui Desktop App
+### B6: memo-ui Desktop App -- **DONE**
 
 **Scope:** Tauri v2 native macOS admin application — mount management, token management, audit log viewer.
 

@@ -8,10 +8,25 @@ license.workspace = true
 name = "memo_ui"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = []
+tauri-app = ["dep:tauri", "dep:tauri-plugin-store"]
+
 [lints]
 workspace = true
 
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
 [dependencies]
+memo-client = { path = "../../memo-client" }
+memo-core = { path = "../../memo-core" }
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+uuid.workspace = true
+tauri = { version = "2", features = [], optional = true }
+tauri-plugin-store = { version = "2", optional = true }
 
 [[bin]]
 name = "memo-ui"

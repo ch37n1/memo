@@ -46,7 +46,8 @@ MVP — single-user personal tool. One human operator, one or more LLM agents, a
 - Stream B Phase 3 (`B3: CLI admin commands`) is complete.
 - Stream B Phase 4 (`B4: CLI filesystem commands`) is complete.
 - Stream B Phase 5 (`B5: Integration & Security Tests`) is complete.
-- Next active milestones are Stream A A6 (`Hardening`) and Stream B B6 (`memo-ui` desktop app).
+- Stream A Phase 6 (`A6: Hardening`) is complete.
+- Stream B Phase 6 (`B6: memo-ui` desktop app) is complete.
 
 ### Goals (v1)
 

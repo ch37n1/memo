@@ -1,16 +1,23 @@
-// memo-ui: Tauri v2 native desktop app backend crate.
+pub mod commands;
 
-#[must_use]
-pub fn app_name() -> &'static str {
-    "memo-ui"
+#[cfg(all(feature = "tauri-app", not(clippy), not(test)))]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_store::Builder::default().build())
+        .invoke_handler(tauri::generate_handler![
+            commands::health,
+            commands::list_mounts,
+            commands::create_mount,
+            commands::remove_mount,
+            commands::list_tokens,
+            commands::create_token,
+            commands::revoke_token,
+            commands::query_audit,
+            commands::browse_tree
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running memo-ui");
 }
 
-#[cfg(test)]
-mod tests {
-    use super::app_name;
-
-    #[test]
-    fn app_name_is_stable() {
-        assert_eq!(app_name(), "memo-ui");
-    }
-}
+#[cfg(any(not(feature = "tauri-app"), clippy, test))]
+pub fn run() {}
