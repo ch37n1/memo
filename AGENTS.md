@@ -250,7 +250,9 @@ Decomposes into phases. Each phase is essentially a mid-task process.
 
 ## Documentation
 
-All docs live in `docs/`. The entry point is `docs/README.md`. Conventions are in `docs/operations/documentation.md`.
+All docs live in `docs/`. The entry point is `docs/README.md`. Conventions are in `docs/operations/documentation.md` ([!IMPORTANT] use this files).
+Roadmap source of truth: `docs/roadmap-v1.md`.
+When planning or checking phase status, agents must use `docs/roadmap-v1.md` by default without requiring a user reminder.
 
 Key directories (planned, not all exist yet):
 
