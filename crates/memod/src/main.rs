@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod db;
+pub mod fs;
 pub mod mount_registry;
 
 use std::future::pending;
@@ -13,17 +14,19 @@ use std::sync::Arc;
 
 use auth::middleware::{auth_middleware, AuthState, VerifiedToken};
 use auth::repository::SqliteTokenRepository;
-use axum::extract::{Path, State};
+use axum::body::Body;
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
 use memo_core::repositories::MountRepository;
 use memo_core::repositories::TokenRepository;
-use memo_core::{ApiError, AuthError, DbError, TokenId};
+use memo_core::{ApiError, AuthError, DbError, MountPath, TokenId};
 use mount_registry::repository::{PolicyCache, SqliteMountRepository};
 use serde::Serialize;
+use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -54,6 +57,7 @@ impl AppConfig {
 struct AppState {
     token_repository: Arc<SqliteTokenRepository>,
     mount_repository: Arc<SqliteMountRepository>,
+    file_system_service: Arc<fs::ops::FileSystemService>,
 }
 
 #[derive(Debug, Serialize)]
@@ -164,6 +168,9 @@ async fn run(config: AppConfig) -> Result<(), ApiError> {
     }
 
     let state = AppState {
+        file_system_service: Arc::new(fs::ops::FileSystemService::new(Arc::clone(
+            &mount_repository,
+        ))),
         token_repository,
         mount_repository,
     };
@@ -212,10 +219,31 @@ fn app_router(state: &AppState) -> Router {
         ))
         .with_state(state.clone());
 
+    let fs_routes = Router::new()
+        .route("/v1/fs/ls", get(fs_ls))
+        .route("/v1/fs/tree", get(fs_tree))
+        .route("/v1/fs/stat", get(fs_stat))
+        .route("/v1/fs/read", get(fs_read))
+        .route("/v1/fs/write", put(fs_write))
+        .route("/v1/fs/mkdir", post(fs_mkdir))
+        .route("/v1/fs/mv", post(fs_mv))
+        .route("/v1/fs/rm", delete(fs_rm))
+        .route("/v1/fs/cp", post(fs_cp))
+        .route("/v1/fs/grep", get(fs_grep))
+        .route("/v1/fs/find", get(fs_find))
+        .layer(middleware::from_fn_with_state(
+            AuthState {
+                token_repository: Arc::clone(&state.token_repository),
+            },
+            auth_middleware,
+        ))
+        .with_state(state.clone());
+
     Router::new()
         .route("/health", get(health))
         .merge(token_routes)
         .merge(mount_routes)
+        .merge(fs_routes)
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -375,6 +403,285 @@ fn map_mount_not_found(name: &memo_core::MountName, error: DbError) -> HttpError
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct FsPathQuery {
+    path: MountPath,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FsLsQuery {
+    path: MountPath,
+    #[serde(default)]
+    info: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FsTreeQuery {
+    path: MountPath,
+    #[serde(default)]
+    depth: Option<u8>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FsRmQuery {
+    path: MountPath,
+    #[serde(default)]
+    recursive: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FsMvQuery {
+    src: MountPath,
+    dst: MountPath,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FsCpQuery {
+    src: MountPath,
+    dst: MountPath,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FsGrepQuery {
+    path: MountPath,
+    pattern: String,
+    #[serde(default)]
+    recursive: Option<bool>,
+    #[serde(default)]
+    case_sensitive: Option<bool>,
+    #[serde(default)]
+    max_results: Option<u64>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FsFindQuery {
+    path: MountPath,
+    glob: String,
+    #[serde(default)]
+    max_results: Option<u64>,
+}
+
+async fn fs_ls(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsLsQuery>,
+) -> Result<Json<fs::ops::LsResponse>, HttpError> {
+    if !fs::ops::require_fs_read_scope(&token, query.path.mount()) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    state
+        .file_system_service
+        .ls(&query.path, query.info.unwrap_or(false))
+        .await
+        .map(Json)
+        .map_err(HttpError)
+}
+
+async fn fs_tree(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsTreeQuery>,
+) -> Result<Json<fs::ops::TreeResponse>, HttpError> {
+    if !fs::ops::require_fs_read_scope(&token, query.path.mount()) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    state
+        .file_system_service
+        .tree(&query.path, query.depth)
+        .await
+        .map(Json)
+        .map_err(HttpError)
+}
+
+async fn fs_stat(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsPathQuery>,
+) -> Result<Json<fs::ops::StatResponse>, HttpError> {
+    if !fs::ops::require_fs_read_scope(&token, query.path.mount()) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    state
+        .file_system_service
+        .stat(&query.path)
+        .await
+        .map(Json)
+        .map_err(HttpError)
+}
+
+async fn fs_read(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsPathQuery>,
+) -> Result<Response, HttpError> {
+    if !fs::ops::require_fs_read_scope(&token, query.path.mount()) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    let (resolved, size, mime) = state
+        .file_system_service
+        .read_file_meta(&query.path)
+        .await
+        .map_err(HttpError)?;
+    let content_type = axum::http::HeaderValue::from_str(&mime)
+        .unwrap_or_else(|_| axum::http::HeaderValue::from_static("application/octet-stream"));
+
+    let mut response = if size > 4 * 1024 * 1024 {
+        let file = tokio::fs::File::open(resolved)
+            .await
+            .map_err(|error| HttpError(ApiError::Internal(error.to_string())))?;
+        let stream = ReaderStream::new(file);
+        Body::from_stream(stream).into_response()
+    } else {
+        let bytes = tokio::fs::read(resolved)
+            .await
+            .map_err(|error| HttpError(ApiError::Internal(error.to_string())))?;
+        bytes.into_response()
+    };
+
+    response
+        .headers_mut()
+        .insert(axum::http::header::CONTENT_TYPE, content_type);
+    Ok(response)
+}
+
+async fn fs_write(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsPathQuery>,
+    body: Body,
+) -> Result<Json<fs::ops::WriteResponse>, HttpError> {
+    if !fs::ops::require_fs_write_scope(&token, query.path.mount()) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    let bytes = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .map_err(|error| HttpError(ApiError::Internal(error.to_string())))?;
+
+    state
+        .file_system_service
+        .write_file(&query.path, &bytes)
+        .await
+        .map(Json)
+        .map_err(HttpError)
+}
+
+async fn fs_mkdir(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsPathQuery>,
+) -> Result<Json<fs::ops::MkdirResponse>, HttpError> {
+    if !fs::ops::require_fs_write_scope(&token, query.path.mount()) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    state
+        .file_system_service
+        .mkdir(&query.path)
+        .await
+        .map(Json)
+        .map_err(HttpError)
+}
+
+async fn fs_mv(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsMvQuery>,
+) -> Result<Json<fs::ops::MoveResponse>, HttpError> {
+    if !fs::ops::require_fs_write_scope(&token, query.src.mount())
+        || !fs::ops::require_fs_write_scope(&token, query.dst.mount())
+    {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    state
+        .file_system_service
+        .mv(&query.src, &query.dst)
+        .await
+        .map(Json)
+        .map_err(HttpError)
+}
+
+async fn fs_rm(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsRmQuery>,
+) -> Result<Json<fs::ops::RemoveResponse>, HttpError> {
+    if !fs::ops::require_fs_write_scope(&token, query.path.mount()) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    state
+        .file_system_service
+        .rm(&query.path, query.recursive.unwrap_or(false))
+        .await
+        .map(Json)
+        .map_err(HttpError)
+}
+
+async fn fs_cp(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsCpQuery>,
+) -> Result<Json<fs::ops::CopyResponse>, HttpError> {
+    if !fs::ops::require_fs_read_scope(&token, query.src.mount())
+        || !fs::ops::require_fs_write_scope(&token, query.dst.mount())
+    {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    state
+        .file_system_service
+        .cp(&query.src, &query.dst)
+        .await
+        .map(Json)
+        .map_err(HttpError)
+}
+
+async fn fs_grep(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsGrepQuery>,
+) -> Result<Json<fs::ops::GrepResponse>, HttpError> {
+    if !fs::ops::require_fs_read_scope(&token, query.path.mount()) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    state
+        .file_system_service
+        .grep(
+            &query.path,
+            &query.pattern,
+            query.recursive.unwrap_or(true),
+            query.case_sensitive.unwrap_or(true),
+            query.max_results.unwrap_or(100),
+        )
+        .await
+        .map(Json)
+        .map_err(HttpError)
+}
+
+async fn fs_find(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<FsFindQuery>,
+) -> Result<Json<fs::ops::FindResponse>, HttpError> {
+    if !fs::ops::require_fs_read_scope(&token, query.path.mount()) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    state
+        .file_system_service
+        .find(&query.path, &query.glob, query.max_results.unwrap_or(100))
+        .await
+        .map(Json)
+        .map_err(HttpError)
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error;
@@ -403,6 +710,9 @@ mod tests {
         let mount_repository =
             std::sync::Arc::new(SqliteMountRepository::new(pool, PolicyCache::new()));
         let state = super::AppState {
+            file_system_service: std::sync::Arc::new(crate::fs::ops::FileSystemService::new(
+                std::sync::Arc::clone(&mount_repository),
+            )),
             token_repository,
             mount_repository,
         };
