@@ -17,6 +17,7 @@ Focus: responsibilities, invariants, flows, edge-case behavior, and integration 
 - [Mount Registry](mount-registry.md)
 - [File System](file-system.md)
 - [Audit](audit.md)
+- [CLI](cli.md)
 
 ## How To Use
 

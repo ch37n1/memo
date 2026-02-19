@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) or other agent when 
 
 `memo` is a secure, mount-scoped, daemon-backed filesystem layer for collaborative human–agent knowledge work. It gives humans and LLM agents a shared, policy-controlled space to read, write, and build a common knowledge base.
 
-**Status:** In implementation. Phase 0 is complete, and Stream B Phase 1 (`B1: memo-client`) is complete.
+**Status:** In implementation. Phases 0-1 are complete, and Stream B Phase 2 (`B2: CLI scaffolding + daemon commands`) is complete.
 
 **Primary platform:** macOS. Linux is a supported secondary target. Windows is out of scope.
 

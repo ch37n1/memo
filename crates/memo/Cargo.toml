@@ -12,3 +12,13 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+clap.workspace = true
+memo-client = { path = "../memo-client" }
+memo-core = { path = "../memo-core" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

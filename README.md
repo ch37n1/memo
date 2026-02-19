@@ -6,7 +6,7 @@ description: memo — secure, mount-scoped, daemon-backed filesystem layer for c
 
 A secure, mount-scoped, daemon-backed filesystem layer for collaborative human–agent knowledge work. It gives humans and LLM agents a shared, policy-controlled space to read, write, and build a common knowledge base.
 
-**Status:** In implementation. Phase 0 is complete; Stream A1 (`memod` database layer) and Stream B1 (`memo-client`) are complete.
+**Status:** In implementation. Phases 0-1 are complete; Stream A1 (`memod` database layer), Stream B1 (`memo-client`), and Stream B2 (`memo` CLI scaffolding + daemon commands) are complete.
 
 **Primary platform:** macOS. Linux is a supported secondary target.
 

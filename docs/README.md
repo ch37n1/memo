@@ -33,6 +33,7 @@ MVP — single-user personal tool. One human operator, one or more LLM agents, a
 - Phase 0 (foundation) is complete.
 - Stream A, A1 (`memod` database layer) is complete.
 - Stream B Phase 1 (`B1: memo-client`) is complete.
+- Stream B Phase 2 (`B2: CLI scaffolding + daemon commands`) is complete.
 - Next active daemon milestone is A2 (authentication and access control).
 - Remaining roadmap items are in progress by stream.
 

@@ -17,8 +17,11 @@ Each item is a complete feature that requires its own implementation plan.
 
 - Phase 0: **DONE**
 - Phase 1: **DONE**
+- Phase 2: **IN PROGRESS**
 - Stream B: **B1 DONE** (`memo-client`)
+- Stream B: **B2 DONE** (`memo` CLI scaffolding + daemon commands)
 - Stream A: **A1 DONE** (`memod` database layer)
+- Stream A: **A2 pending/in progress** (`Access Control BC`)
 
 ---
 
@@ -179,7 +182,7 @@ graph TD
 
 ---
 
-### B2: CLI Scaffolding + Daemon Commands
+### B2: CLI Scaffolding + Daemon Commands -- **DONE**
 
 **Scope:** The `memo` binary shell — clap app, global flags, config resolution — plus the daemon management commands that make the daemon usable.
 
@@ -197,6 +200,8 @@ graph TD
 - JSON output mode (`--json`) vs plain text mode
 
 **Depends on:** B1 (memo-client)
+
+**Status:** Completed in stream `b`.
 
 ---
 
