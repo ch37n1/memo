@@ -221,7 +221,8 @@ mod tests {
 
     use tempfile::NamedTempFile;
 
-    use super::{plist_contents, tail_file, LAUNCHD_LABEL};
+    use super::{emit_output, memod_binary_path, plist_contents, tail_file, LAUNCHD_LABEL};
+    use crate::config::RuntimeConfig;
 
     #[test]
     fn plist_contains_required_fields() {
@@ -243,5 +244,62 @@ mod tests {
         let lines = tail_file(file.path(), 2)
             .unwrap_or_else(|error| panic!("tail should succeed: {error}"));
         assert_eq!(lines, vec!["two".to_owned(), "three".to_owned()]);
+    }
+
+    #[test]
+    fn tail_file_handles_missing_file_and_zero_limit() {
+        let missing = tail_file(Path::new("/definitely/missing/memod.log"), 10)
+            .err()
+            .unwrap_or_else(|| panic!("missing file should fail"));
+        assert!(missing.to_string().contains("log file not found"));
+
+        let mut file = NamedTempFile::new()
+            .unwrap_or_else(|error| panic!("temp file should be created: {error}"));
+        writeln!(file, "one").unwrap_or_else(|error| panic!("line should write: {error}"));
+        writeln!(file, "two").unwrap_or_else(|error| panic!("line should write: {error}"));
+        let one_line = tail_file(file.path(), 0)
+            .unwrap_or_else(|error| panic!("tail should succeed: {error}"));
+        assert_eq!(one_line, vec!["two".to_owned()]);
+    }
+
+    #[test]
+    fn memod_binary_path_returns_sibling_or_fallback() {
+        let path = memod_binary_path()
+            .unwrap_or_else(|error| panic!("binary path should resolve: {error}"));
+        let file_name = path
+            .file_name()
+            .unwrap_or_else(|| panic!("binary path should include file name"))
+            .to_string_lossy()
+            .to_string();
+        assert!(file_name == "memod" || path.exists());
+    }
+
+    #[test]
+    fn emit_output_supports_plain_and_json_modes() {
+        let plain_runtime = RuntimeConfig {
+            json: false,
+            host: "127.0.0.1".to_owned(),
+            port: 18_301,
+            token: None,
+            default_mount: None,
+            log_path: Path::new("/tmp/memod.log").to_path_buf(),
+        };
+        let json_runtime = RuntimeConfig {
+            json: true,
+            ..plain_runtime.clone()
+        };
+
+        assert!(emit_output(
+            &plain_runtime,
+            &serde_json::json!({"status":"ok"}),
+            "started"
+        )
+        .is_ok());
+        assert!(emit_output(
+            &json_runtime,
+            &serde_json::json!({"status":"ok"}),
+            "started"
+        )
+        .is_ok());
     }
 }

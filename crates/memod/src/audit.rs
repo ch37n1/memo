@@ -367,10 +367,10 @@ pub fn denial_reason_code(reason: &DenialReason) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use memo_core::MountName;
+    use memo_core::{DenialReason, DomainEvent, MountMode, MountName, RelativePath, TokenId};
     use tempfile::tempdir;
 
-    use super::{AuditQuery, AuditRecord, AuditResult, AuditService};
+    use super::{denial_reason_code, AuditQuery, AuditRecord, AuditResult, AuditService};
 
     #[tokio::test]
     async fn append_and_query_filters() -> Result<(), Box<dyn std::error::Error>> {
@@ -431,5 +431,190 @@ mod tests {
         assert!(path.with_file_name("audit.log.1").exists());
         assert!(!path.exists());
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn domain_events_map_to_audit_operations() -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempdir()?;
+        let service = AuditService::new(tempdir.path().join("audit.log"))?;
+        let token_id = TokenId::new();
+        let mount = MountName::new("VaultKB")?;
+        let path = RelativePath::new("notes/a.md")?;
+
+        let events = vec![
+            DomainEvent::FileRead {
+                token_id,
+                mount: mount.clone(),
+                path: path.clone(),
+                bytes: 3,
+            },
+            DomainEvent::FileWritten {
+                token_id,
+                mount: mount.clone(),
+                path: path.clone(),
+                bytes: 4,
+            },
+            DomainEvent::DirListed {
+                token_id,
+                mount: mount.clone(),
+                path: RelativePath::root(),
+            },
+            DomainEvent::MountRegistered {
+                name: mount.clone(),
+                mode: MountMode::ReadWrite,
+            },
+            DomainEvent::MountUpdated {
+                name: mount.clone(),
+            },
+            DomainEvent::MountRemoved {
+                name: mount.clone(),
+            },
+            DomainEvent::TokenCreated {
+                id: token_id,
+                name: "agent".to_owned(),
+            },
+            DomainEvent::TokenRevoked { id: token_id },
+            DomainEvent::AccessDenied {
+                token_id: Some(token_id),
+                reason: DenialReason::MissingScope,
+                mount: Some(mount.clone()),
+            },
+        ];
+
+        for event in events {
+            let _ = service.append_domain_event(event).await?;
+        }
+
+        let all = service.query(&AuditQuery::default()).await?;
+        let operations = all
+            .iter()
+            .map(|entry| entry.operation.as_str())
+            .collect::<Vec<_>>();
+        assert!(operations.contains(&"file_read"));
+        assert!(operations.contains(&"file_written"));
+        assert!(operations.contains(&"dir_listed"));
+        assert!(operations.contains(&"mount_registered"));
+        assert!(operations.contains(&"mount_updated"));
+        assert!(operations.contains(&"mount_removed"));
+        assert!(operations.contains(&"token_created"));
+        assert!(operations.contains(&"token_revoked"));
+        assert!(operations.contains(&"access_denied"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn query_supports_time_and_id_filters() -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempdir()?;
+        let service = AuditService::new(tempdir.path().join("audit.log"))?;
+        let mount = MountName::new("VaultKB")?;
+
+        let first = service
+            .append_record(AuditRecord::ok(
+                "first",
+                None,
+                Some(mount.clone()),
+                Some("notes/1.md".to_owned()),
+            ))
+            .await?;
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let second = service
+            .append_record(AuditRecord::ok(
+                "second",
+                None,
+                Some(mount.clone()),
+                Some("notes/2.md".to_owned()),
+            ))
+            .await?;
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let third = service
+            .append_record(AuditRecord::ok(
+                "third",
+                None,
+                Some(mount),
+                Some("notes/3.md".to_owned()),
+            ))
+            .await?;
+
+        let after_id = service
+            .query(&AuditQuery {
+                after_id: Some(first.id),
+                ..AuditQuery::default()
+            })
+            .await?;
+        assert_eq!(after_id.len(), 2);
+        assert_eq!(after_id[0].id, second.id);
+
+        let before = service
+            .query(&AuditQuery {
+                before: Some(third.timestamp),
+                ..AuditQuery::default()
+            })
+            .await?;
+        assert_eq!(before.len(), 2);
+        assert_eq!(before[0].id, first.id);
+        assert_eq!(before[1].id, second.id);
+
+        let after = service
+            .query(&AuditQuery {
+                after: Some(first.timestamp),
+                ..AuditQuery::default()
+            })
+            .await?;
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[0].id, second.id);
+        assert_eq!(after[1].id, third.id);
+
+        let limited = service
+            .query(&AuditQuery {
+                limit: Some(2),
+                ..AuditQuery::default()
+            })
+            .await?;
+        assert_eq!(limited.len(), 2);
+        assert_eq!(limited[0].id, second.id);
+        assert_eq!(limited[1].id, third.id);
+        Ok(())
+    }
+
+    #[test]
+    fn denial_reason_codes_cover_all_variants() {
+        assert_eq!(
+            denial_reason_code(&DenialReason::AuthRequired),
+            "auth_required"
+        );
+        assert_eq!(
+            denial_reason_code(&DenialReason::TokenInvalid),
+            "token_invalid"
+        );
+        assert_eq!(
+            denial_reason_code(&DenialReason::TokenExpired),
+            "token_expired"
+        );
+        assert_eq!(
+            denial_reason_code(&DenialReason::MissingScope),
+            "missing_scope"
+        );
+        assert_eq!(
+            denial_reason_code(&DenialReason::PolicyViolation),
+            "policy_violated"
+        );
+        assert_eq!(
+            denial_reason_code(&DenialReason::InvalidPath),
+            "invalid_path"
+        );
+        assert_eq!(
+            denial_reason_code(&DenialReason::OutOfBounds),
+            "out_of_bounds"
+        );
+        assert_eq!(
+            denial_reason_code(&DenialReason::SymlinkDenied),
+            "symlink_denied"
+        );
+        assert_eq!(
+            denial_reason_code(&DenialReason::MountNotFound),
+            "mount_not_found"
+        );
+        assert_eq!(denial_reason_code(&DenialReason::NotFound), "not_found");
+        assert_eq!(denial_reason_code(&DenialReason::Other), "internal");
     }
 }

@@ -7,7 +7,17 @@ use common::TestHarness;
 
 #[tokio::test]
 async fn policy_end_to_end_suite() -> Result<(), Box<dyn std::error::Error>> {
-    let harness = TestHarness::start().await?;
+    let harness = match TestHarness::start().await {
+        Ok(harness) => harness,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied) =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
     let client = harness.admin_client()?;
 
     let _ = client

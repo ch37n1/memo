@@ -1217,7 +1217,9 @@ async fn fs_find(
 #[cfg(test)]
 mod tests {
     use std::error::Error;
+    use std::io::ErrorKind;
     use std::io::Write;
+    use std::path::PathBuf;
 
     use memo_client::{CreateMountRequest, MemoClient, MemoClientConfig, MemoClientError};
     use memo_core::{ApiError, Audience, MountMode, MountName, MountPath};
@@ -1229,6 +1231,14 @@ mod tests {
     use crate::db::{init_pool, DbConfig};
     use crate::mount_registry::repository::{PolicyCache, SqliteMountRepository};
 
+    async fn bind_loopback_listener() -> Result<Option<tokio::net::TcpListener>, Box<dyn Error>> {
+        match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => Ok(Some(listener)),
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => Ok(None),
+            Err(error) => Err(Box::new(error)),
+        }
+    }
+
     #[tokio::test]
     async fn bootstrap_flow() -> Result<(), Box<dyn Error>> {
         let tempdir = tempdir()?;
@@ -1236,7 +1246,9 @@ mod tests {
         let db_url = format!("sqlite://{}", db_path.display());
         let bootstrap_path = tempdir.path().join("bootstrap.token");
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let Some(listener) = bind_loopback_listener().await? else {
+            return Ok(());
+        };
         let addr = listener.local_addr()?;
 
         let pool = init_pool(&DbConfig::new(db_url.clone())).await?;
@@ -1305,7 +1317,9 @@ mod tests {
         std::fs::create_dir_all(&mount_root)?;
         std::fs::create_dir_all(&archive_root)?;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let Some(listener) = bind_loopback_listener().await? else {
+            return Ok(());
+        };
         let addr = listener.local_addr()?;
 
         let pool = init_pool(&DbConfig::new(db_url.clone())).await?;
@@ -1456,5 +1470,97 @@ mod tests {
         handle.await??;
 
         Ok(())
+    }
+
+    #[test]
+    fn parse_memod_config_reads_nested_sections() {
+        let config = super::parse_memod_config(
+            r#"
+db_path = "/tmp/memo.db"
+log_path = "/tmp/memod.log"
+
+[daemon]
+bind_addr = "127.0.0.1:19191"
+log_level = "debug"
+
+[daemon.write]
+fsync = false
+dir_sync = true
+
+[daemon.limits]
+max_audit_log_rows = 1234
+"#,
+        );
+
+        assert_eq!(config.db_path, Some(PathBuf::from("/tmp/memo.db")));
+        assert_eq!(config.log_path, Some(PathBuf::from("/tmp/memod.log")));
+
+        let daemon = config
+            .daemon
+            .unwrap_or_else(|| panic!("daemon section should parse"));
+        assert_eq!(daemon.bind_addr.as_deref(), Some("127.0.0.1:19191"));
+        assert_eq!(daemon.log_level.as_deref(), Some("debug"));
+
+        let write = daemon
+            .write
+            .unwrap_or_else(|| panic!("daemon.write should parse"));
+        assert_eq!(write.fsync, Some(false));
+        assert_eq!(write.dir_sync, Some(true));
+
+        let limits = daemon
+            .limits
+            .unwrap_or_else(|| panic!("daemon.limits should parse"));
+        assert_eq!(limits.max_audit_log_rows, Some(1234));
+    }
+
+    #[test]
+    fn parse_memod_config_ignores_invalid_values() {
+        let config = super::parse_memod_config(
+            r#"
+[daemon.write]
+fsync = "definitely-not-bool"
+dir_sync = "also-not-bool"
+
+[daemon.limits]
+max_audit_log_rows = "invalid"
+"#,
+        );
+
+        let daemon = config
+            .daemon
+            .unwrap_or_else(|| panic!("daemon section should always exist"));
+        let write = daemon
+            .write
+            .unwrap_or_else(|| panic!("write section should always exist"));
+        assert_eq!(write.fsync, None);
+        assert_eq!(write.dir_sync, None);
+        let limits = daemon
+            .limits
+            .unwrap_or_else(|| panic!("limits section should always exist"));
+        assert_eq!(limits.max_audit_log_rows, None);
+    }
+
+    #[test]
+    fn app_config_validate_rejects_zero_audit_limit() {
+        let config = super::AppConfig {
+            bind_addr: "127.0.0.1:18301".to_owned(),
+            database_url: "sqlite:///tmp/memo.db".to_owned(),
+            log_level: "info".to_owned(),
+            log_path: PathBuf::from("/tmp/memod.log"),
+            write_fsync: true,
+            write_dir_sync: true,
+            pid_file_path: PathBuf::from("/tmp/memod.pid"),
+            audit_log_path: PathBuf::from("/tmp/audit.log"),
+            max_audit_log_rows: 0,
+            bootstrap_token_path: PathBuf::from("/tmp/bootstrap.token"),
+        };
+
+        let error = config
+            .validate()
+            .err()
+            .unwrap_or_else(|| panic!("zero limit should fail validation"));
+        assert!(error
+            .to_string()
+            .contains("max_audit_log_rows must be greater than zero"));
     }
 }

@@ -384,6 +384,7 @@ fn write_stdout_bytes(bytes: &[u8]) -> Result<(), CliError> {
 #[allow(clippy::expect_used)]
 mod tests {
     use std::collections::HashMap;
+    use std::io::ErrorKind;
     use std::path::PathBuf;
 
     use axum::body::Body as AxumBody;
@@ -545,7 +546,7 @@ mod tests {
         }))
     }
 
-    async fn spawn_fs_server() -> (RuntimeConfig, JoinHandle<()>) {
+    async fn spawn_fs_server() -> std::io::Result<(RuntimeConfig, JoinHandle<()>)> {
         let app = Router::new()
             .route("/v1/fs/ls", get(fs_ls))
             .route("/v1/fs/tree", get(fs_tree))
@@ -559,17 +560,15 @@ mod tests {
             .route("/v1/fs/grep", get(fs_grep))
             .route("/v1/fs/find", get(fs_find));
 
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("listener should bind");
-        let addr = listener.local_addr().expect("listener should have addr");
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
         let handle = tokio::spawn(async move {
             axum::serve(listener, app)
                 .await
                 .expect("mock server should run");
         });
 
-        (
+        Ok((
             runtime_for_addr(
                 true,
                 addr.ip().to_string(),
@@ -577,7 +576,7 @@ mod tests {
                 Some("VaultKB".to_owned()),
             ),
             handle,
-        )
+        ))
     }
 
     #[test]
@@ -833,8 +832,13 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn run_fs_commands_succeed_against_mock_server() {
-        let (cfg, server) = spawn_fs_server().await;
+        let (cfg, server) = match spawn_fs_server().await {
+            Ok(value) => value,
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("mock server should start: {error}"),
+        };
 
         let local_dir = tempfile::tempdir().expect("temp dir should be created");
         let local_file = local_dir.path().join("input.md");

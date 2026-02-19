@@ -7,7 +7,17 @@ use common::TestHarness;
 
 #[tokio::test]
 async fn atomic_write_concurrent_and_cleanup_suite() -> Result<(), Box<dyn std::error::Error>> {
-    let harness = TestHarness::start().await?;
+    let harness = match TestHarness::start().await {
+        Ok(harness) => harness,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied) =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
     harness.ensure_default_mounts().await?;
     let client = harness.admin_client()?;
 

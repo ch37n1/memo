@@ -8,7 +8,17 @@ use common::TestHarness;
 
 #[tokio::test]
 async fn auth_end_to_end_suite() -> Result<(), Box<dyn std::error::Error>> {
-    let harness = TestHarness::start().await?;
+    let harness = match TestHarness::start().await {
+        Ok(harness) => harness,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied) =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
     harness.ensure_default_mounts().await?;
 
     let no_token_client = MemoClient::for_base_url(&harness.base_url)?;

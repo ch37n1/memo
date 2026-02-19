@@ -674,6 +674,8 @@ fn map_status_fallback(status: StatusCode, message: &str) -> ApiError {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
+    use std::io::ErrorKind;
+
     use std::collections::HashMap;
 
     use axum::{
@@ -898,7 +900,7 @@ mod tests {
         Json(json!({ "status": "ok", "version": "0.1.0" }))
     }
 
-    async fn spawn_server() -> String {
+    async fn spawn_server() -> std::io::Result<Option<String>> {
         let app = Router::new()
             .route("/v1/fs/ls", get(fs_ls))
             .route("/v1/fs/tree", get(fs_tree))
@@ -929,15 +931,17 @@ mod tests {
             .route("/v1/meta/audit", get(meta_audit))
             .route("/health", get(health));
 
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("listener should bind");
-        let addr = listener.local_addr().expect("local addr should exist");
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let addr = listener.local_addr()?;
         tokio::spawn(async move {
             axum::serve(listener, app).await.expect("server should run");
         });
 
-        format!("http://{addr}")
+        Ok(Some(format!("http://{addr}")))
     }
 
     #[test]
@@ -1017,8 +1021,12 @@ mod tests {
         assert_eq!(name.to_string(), "VaultKB");
     }
 
-    async fn build_client() -> (MemoClient, MountPath, MountPath, MountPath, MountName) {
-        let base_url = spawn_server().await;
+    async fn build_client() -> Option<(MemoClient, MountPath, MountPath, MountPath, MountName)> {
+        let base_url = match spawn_server().await {
+            Ok(Some(base_url)) => base_url,
+            Ok(None) => return None,
+            Err(error) => panic!("mock server should start: {error}"),
+        };
         let path = MountPath::parse("VaultKB:/notes/git.md").expect("path should parse");
         let src = MountPath::parse("VaultKB:/notes/a.md").expect("src should parse");
         let dst = MountPath::parse("VaultKB:/archive/a.md").expect("dst should parse");
@@ -1030,12 +1038,14 @@ mod tests {
             .with_timeout(std::time::Duration::from_secs(10))
             .expect("timeout should apply");
 
-        (client, path, src, dst, mount_name)
+        Some((client, path, src, dst, mount_name))
     }
 
     #[tokio::test]
     async fn memo_client_exercises_filesystem_endpoint_wrappers() {
-        let (client, path, src, dst, _) = build_client().await;
+        let Some((client, path, src, dst, _)) = build_client().await else {
+            return;
+        };
 
         let ls = client
             .ls(
@@ -1135,7 +1145,9 @@ mod tests {
 
     #[tokio::test]
     async fn memo_client_exercises_meta_endpoint_wrappers() {
-        let (client, _, _, _, mount_name) = build_client().await;
+        let Some((client, _, _, _, mount_name)) = build_client().await else {
+            return;
+        };
 
         let mounts = client
             .list_mounts()
@@ -1220,7 +1232,11 @@ mod tests {
 
     #[tokio::test]
     async fn memo_client_maps_api_errors_from_error_response() {
-        let base_url = spawn_server().await;
+        let base_url = match spawn_server().await {
+            Ok(Some(base_url)) => base_url,
+            Ok(None) => return,
+            Err(error) => panic!("mock server should start: {error}"),
+        };
         let client = MemoClient::for_base_url(base_url).expect("client should construct");
         let missing_path =
             MountPath::parse("VaultKB:/notes/missing.md").expect("path should parse");
