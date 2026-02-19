@@ -163,16 +163,87 @@ memod/src/
 
 ## Task Workflow
 
-Follow **understand → implement → verify → document**:
+Every task follows the same core loop: **understand → implement → verify → document**. The depth of each phase scales with task size.
 
-- **Small (known context):** implement → verify (automations) → update docs if needed
-- **Small (unknown context):** explore codebase first → implement → verify → docs
-- **Mid:** explore → create step-by-step plan → implement → verify → review → docs
-- **Large:** explore → create phases (each a mid-task process) → execute phase by phase
+| Size | Context | Planning | Implementation | Key difference |
+|------|---------|----------|----------------|----------------|
+| Small (known context) | Provided, sufficient | None | Direct | Fastest path, no exploration needed |
+| Small (unknown context) | Needs exploration | None | Direct | Self-guided context gathering before work |
+| Mid | Always explore more | Plan with steps | Step by step | Structured plan, review gate before finish |
+| Large | Always explore more | Plan with phases | Phase by phase | Decomposes into multiple mid-task processes |
 
-Always run `cargo fmt --check`, `cargo clippy`, and `cargo test` before marking a task done.
+### Common Steps
 
-> Check [task-workflow](/docs/operations/task-workflow.md) for full workflow description.
+**Context:**
+
+| Step | Action |
+|------|--------|
+| **Read provided context** | Read all referenced materials: docs, tickets, code, conversations. |
+| **Explore additional context** | Investigate codebase, related modules, dependencies. Form your own understanding. |
+| **Clarify** | If context is still insufficient — ask questions. Do not guess on ambiguous requirements. |
+
+**Verify:**
+
+| Step | Action |
+|------|--------|
+| **Run automations** | Linters, formatters, tests. All must pass. |
+| **Fix issues** | Resolve any failures from automations. Re-run until clean. |
+
+**Document:**
+
+| Step | Action |
+|------|--------|
+| **Check if docs need update** | Do changes affect documented behavior, architecture, or contracts? |
+| **Update docs** | If yes — update relevant documentation. |
+| **Update QA cases** | Add or update manual test cases for the most important scenarios. Keep it minimal — only critical paths and edge cases. |
+
+### Small Task — Known Context
+
+The context provided is sufficient to start immediately.
+
+1. Read provided context
+2. If not enough — clarify, otherwise proceed
+3. Implement
+4. Verify
+5. Document
+6. Done
+
+### Small Task — Unknown Context
+
+Context needs self-guided exploration before implementation.
+
+1. Read provided context
+2. Explore additional context
+3. If not enough — clarify, otherwise proceed
+4. Implement
+5. Verify
+6. Document
+7. Done
+
+### Mid Task
+
+Always requires deeper context exploration. Implementation follows a structured plan.
+
+1. Read provided context
+2. Explore additional context
+3. If not enough — clarify, otherwise proceed
+4. Create a plan with implementation steps
+5. Implement step by step (single phase)
+6. Verify
+7. Review changes — if fixes needed, return to step 5
+8. Document
+9. Done
+
+### Large Task
+
+Decomposes into phases. Each phase is essentially a mid-task process.
+
+1. Read provided context
+2. Explore additional context
+3. If not enough — clarify, otherwise proceed
+4. Create a plan with phases, each containing steps
+5. Execute each phase as a mid-task process (plan steps → implement → verify → review → document)
+6. Done
 
 ---
 
