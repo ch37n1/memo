@@ -27,17 +27,18 @@ impl PolicyEngine {
         relative: &RelativePath,
         file_size: Option<u64>,
     ) -> Result<PathBuf, PolicyError> {
+        let compiled = self
+            .policy_cache
+            .get_or_compile(mount)
+            .map_err(|error| PolicyError::InvalidPolicy(error.to_string()))?;
         let lexical_path = mount.resolve(relative);
         let canonical_path = lexical_path
             .canonicalize()
             .map_err(|_| PolicyError::NotFound)?;
-        let root_canonical = mount
-            .root_path
-            .canonicalize()
-            .map_err(|_| PolicyError::InvalidPath)?;
-        let normalized = normalize_joined_path(&root_canonical, relative);
+        let root_canonical = &compiled.root_path_canonical;
+        let normalized = normalize_joined_path(root_canonical, relative);
 
-        if !canonical_path.starts_with(&root_canonical) {
+        if !canonical_path.starts_with(root_canonical) {
             return Err(PolicyError::OutOfBounds);
         }
 
@@ -45,18 +46,21 @@ impl PolicyEngine {
             return Err(PolicyError::SymlinkDenied);
         }
 
-        let compiled = self.policy_cache.get_or_compile(mount);
-        if compiled
-            .policy
-            .is_hidden(relative)
-            .map_err(|error| map_policy_error(&error))?
-        {
+        let relative_str = relative.as_str();
+        if compiled.hide_globs.is_match(relative_str) {
             return Err(PolicyError::NotFound);
         }
-        compiled
-            .policy
-            .check_read(relative, file_size)
-            .map_err(|error| map_policy_error(&error))?;
+        if compiled.deny_read_globs.is_match(relative_str) {
+            return Err(PolicyError::PermissionDenied);
+        }
+        if let (Some(limit), Some(size)) = (compiled.max_read_bytes, file_size) {
+            if size > limit {
+                return Err(PolicyError::TooLarge {
+                    limit,
+                    actual: size,
+                });
+            }
+        }
 
         Ok(canonical_path)
     }
@@ -73,6 +77,10 @@ impl PolicyEngine {
         relative: &RelativePath,
         write_size: u64,
     ) -> Result<PathBuf, PolicyError> {
+        let compiled = self
+            .policy_cache
+            .get_or_compile(mount)
+            .map_err(|error| PolicyError::InvalidPolicy(error.to_string()))?;
         if relative.is_root() {
             return Err(PolicyError::InvalidPath);
         }
@@ -82,16 +90,13 @@ impl PolicyEngine {
         let canonical_parent = parent
             .canonicalize()
             .map_err(|_| PolicyError::InvalidPath)?;
-        let root_canonical = mount
-            .root_path
-            .canonicalize()
-            .map_err(|_| PolicyError::InvalidPath)?;
+        let root_canonical = &compiled.root_path_canonical;
         let relative_parent = Path::new(relative.as_str())
             .parent()
             .unwrap_or_else(|| Path::new(""));
-        let normalized_parent = normalize_parent_path(&root_canonical, relative_parent);
+        let normalized_parent = normalize_parent_path(root_canonical, relative_parent);
 
-        if !canonical_parent.starts_with(&root_canonical) {
+        if !canonical_parent.starts_with(root_canonical) {
             return Err(PolicyError::OutOfBounds);
         }
 
@@ -104,35 +109,22 @@ impl PolicyEngine {
             .ok_or(PolicyError::InvalidPath)?;
         let resolved = canonical_parent.join(filename);
 
-        let compiled = self.policy_cache.get_or_compile(mount);
-        if compiled
-            .policy
-            .is_hidden(relative)
-            .map_err(|error| map_policy_error(&error))?
+        let relative_str = relative.as_str();
+        if compiled.hide_globs.is_match(relative_str)
+            || compiled.deny_write_globs.is_match(relative_str)
         {
             return Err(PolicyError::PermissionDenied);
         }
-        compiled
-            .policy
-            .check_write(relative, write_size)
-            .map_err(|error| map_policy_error(&error))?;
+        if let Some(limit) = compiled.max_write_bytes {
+            if write_size > limit {
+                return Err(PolicyError::TooLarge {
+                    limit,
+                    actual: write_size,
+                });
+            }
+        }
 
         Ok(resolved)
-    }
-}
-
-fn map_policy_error(error: &PolicyError) -> PolicyError {
-    match error {
-        PolicyError::InvalidPath => PolicyError::InvalidPath,
-        PolicyError::InvalidPolicy(reason) => PolicyError::InvalidPolicy(reason.clone()),
-        PolicyError::OutOfBounds => PolicyError::OutOfBounds,
-        PolicyError::SymlinkDenied => PolicyError::SymlinkDenied,
-        PolicyError::NotFound => PolicyError::NotFound,
-        PolicyError::PermissionDenied => PolicyError::PermissionDenied,
-        PolicyError::TooLarge { limit, actual } => PolicyError::TooLarge {
-            limit: *limit,
-            actual: *actual,
-        },
     }
 }
 
@@ -317,6 +309,18 @@ mod tests {
             assert!(
                 RelativePath::new(candidate).is_err(),
                 "expected path to fail: {candidate:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "security"]
+    fn traversal_corpus_decoded_forms_rejected() {
+        let decoded = ["../secret", "a/../../secret", "/tmp/secret", "..//secret"];
+        for candidate in decoded {
+            assert!(
+                RelativePath::new(candidate).is_err(),
+                "decoded traversal should fail: {candidate}"
             );
         }
     }

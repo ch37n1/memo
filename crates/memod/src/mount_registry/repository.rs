@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::{collections::HashMap, sync::RwLock};
 
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use memo_core::repositories::MountRepository;
 use memo_core::{DbError, Mount, MountName, MountPolicy};
 use sqlx::SqlitePool;
@@ -11,16 +12,44 @@ use crate::db::{audience_from_db, audience_to_db, mount_mode_from_db, mount_mode
 
 #[derive(Debug, Clone)]
 pub struct CompiledMount {
-    pub policy: MountPolicy,
+    pub hide_globs: GlobSet,
+    pub deny_read_globs: GlobSet,
+    pub deny_write_globs: GlobSet,
+    pub root_path_canonical: std::path::PathBuf,
+    pub max_read_bytes: Option<u64>,
+    pub max_write_bytes: Option<u64>,
 }
 
 impl CompiledMount {
-    #[must_use]
-    pub fn from_policy(policy: &MountPolicy) -> Self {
-        Self {
-            policy: policy.clone(),
-        }
+    /// Compiles mount globs and canonical mount root once per cache entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Query`] when glob compilation or canonicalization fails.
+    pub fn from_mount(mount: &Mount) -> Result<Self, DbError> {
+        Ok(Self {
+            hide_globs: compile_glob_set(&mount.policy.hide_globs)?,
+            deny_read_globs: compile_glob_set(&mount.policy.deny_read_globs)?,
+            deny_write_globs: compile_glob_set(&mount.policy.deny_write_globs)?,
+            root_path_canonical: mount
+                .root_path
+                .canonicalize()
+                .map_err(|error| DbError::Query(error.to_string()))?,
+            max_read_bytes: mount.policy.max_read_bytes,
+            max_write_bytes: mount.policy.max_write_bytes,
+        })
     }
+}
+
+fn compile_glob_set(globs: &[String]) -> Result<GlobSet, DbError> {
+    let mut builder = GlobSetBuilder::new();
+    for glob in globs {
+        let parsed = Glob::new(glob).map_err(|error| DbError::Query(error.to_string()))?;
+        builder.add(parsed);
+    }
+    builder
+        .build()
+        .map_err(|error| DbError::Query(error.to_string()))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -34,24 +63,28 @@ impl PolicyCache {
         Self::default()
     }
 
-    #[must_use]
-    pub fn get_or_compile(&self, mount: &Mount) -> Arc<CompiledMount> {
+    /// Returns cached compiled policy or compiles and caches on first access.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Query`] when compilation fails.
+    pub fn get_or_compile(&self, mount: &Mount) -> Result<Arc<CompiledMount>, DbError> {
         let guard = self
             .inner
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(compiled) = guard.get(mount.name.as_str()) {
-            return Arc::clone(compiled);
+            return Ok(Arc::clone(compiled));
         }
         drop(guard);
 
-        let compiled = Arc::new(CompiledMount::from_policy(&mount.policy));
+        let compiled = Arc::new(CompiledMount::from_mount(mount)?);
         let mut guard = self
             .inner
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.insert(mount.name.as_str().to_owned(), Arc::clone(&compiled));
-        compiled
+        Ok(compiled)
     }
 
     pub fn invalidate_mount(&self, name: &MountName) {
@@ -369,7 +402,7 @@ mod tests {
     use std::path::PathBuf;
 
     use memo_core::repositories::MountRepository;
-    use memo_core::{Audience, Mount, MountMode, MountName, MountPolicy, RelativePath};
+    use memo_core::{Audience, Mount, MountMode, MountName, MountPolicy};
     use tempfile::tempdir;
     use time::OffsetDateTime;
 
@@ -466,6 +499,8 @@ mod tests {
     #[tokio::test]
     async fn cache_is_invalidated_after_update() -> Result<(), Box<dyn std::error::Error>> {
         let tempdir = tempdir()?;
+        let root = tempdir.path().join("vault");
+        std::fs::create_dir_all(&root)?;
         let db_url = format!("sqlite://{}", tempdir.path().join("memo.db").display());
         let pool = init_pool(&DbConfig::new(db_url)).await?;
         let repository = SqliteMountRepository::new(pool, PolicyCache::new());
@@ -473,7 +508,7 @@ mod tests {
         let now = OffsetDateTime::now_utc();
         let mount = Mount::new(
             MountName::new("VaultKB")?,
-            PathBuf::from("/tmp/vault"),
+            root,
             MountMode::ReadWrite,
             Audience::Shared,
             None,
@@ -486,13 +521,9 @@ mod tests {
         repository.create(&mount).await?;
 
         let fetched = repository.find(&mount.name).await?;
-        let compiled_before = repository.policy_cache().get_or_compile(&fetched);
-        assert!(compiled_before
-            .policy
-            .is_hidden(&RelativePath::new("a/1.md")?)?);
-        assert!(!compiled_before
-            .policy
-            .is_hidden(&RelativePath::new("b/1.md")?)?);
+        let compiled_before = repository.policy_cache().get_or_compile(&fetched)?;
+        assert!(compiled_before.hide_globs.is_match("a/1.md"));
+        assert!(!compiled_before.hide_globs.is_match("b/1.md"));
 
         let updated = Mount {
             policy: MountPolicy {
@@ -505,13 +536,38 @@ mod tests {
         repository.update(&updated).await?;
 
         let fetched_after = repository.find(&mount.name).await?;
-        let compiled_after = repository.policy_cache().get_or_compile(&fetched_after);
-        assert!(!compiled_after
-            .policy
-            .is_hidden(&RelativePath::new("a/1.md")?)?);
-        assert!(compiled_after
-            .policy
-            .is_hidden(&RelativePath::new("b/1.md")?)?);
+        let compiled_after = repository.policy_cache().get_or_compile(&fetched_after)?;
+        assert!(!compiled_after.hide_globs.is_match("a/1.md"));
+        assert!(compiled_after.hide_globs.is_match("b/1.md"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cache_compile_rejects_invalid_glob() -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempdir()?;
+        let root = tempdir.path().join("vault");
+        std::fs::create_dir_all(&root)?;
+        let db_url = format!("sqlite://{}", tempdir.path().join("memo.db").display());
+        let pool = init_pool(&DbConfig::new(db_url)).await?;
+        let repository = SqliteMountRepository::new(pool, PolicyCache::new());
+
+        let mount = Mount::new(
+            MountName::new("VaultKB")?,
+            root,
+            MountMode::ReadWrite,
+            Audience::Shared,
+            None,
+            MountPolicy {
+                hide_globs: vec!["[".to_owned()],
+                ..MountPolicy::default()
+            },
+            OffsetDateTime::now_utc(),
+        )?;
+        repository.create(&mount).await?;
+        let fetched = repository.find(&mount.name).await?;
+
+        let result = repository.policy_cache().get_or_compile(&fetched);
+        assert!(matches!(result, Err(memo_core::DbError::Query(_))));
         Ok(())
     }
 }

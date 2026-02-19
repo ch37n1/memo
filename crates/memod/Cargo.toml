@@ -15,6 +15,7 @@ workspace = true
 async-trait.workspace = true
 axum.workspace = true
 argon2.workspace = true
+globset.workspace = true
 memo-core = { path = "../memo-core" }
 rand.workspace = true
 serde.workspace = true

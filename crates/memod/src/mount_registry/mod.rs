@@ -12,6 +12,30 @@ use time::OffsetDateTime;
 
 use crate::mount_registry::repository::SqliteMountRepository;
 
+#[derive(Debug, Clone, Default)]
+pub enum PatchValue<T> {
+    #[default]
+    Missing,
+    Null,
+    Value(T),
+}
+
+impl<'de, T> Deserialize<'de> for PatchValue<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Option::<T>::deserialize(deserializer)?;
+        Ok(match value {
+            Some(value) => Self::Value(value),
+            None => Self::Null,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateMountRequest {
     pub name: MountName,
@@ -39,7 +63,7 @@ pub struct UpdateMountRequest {
     #[serde(default)]
     pub audience: Option<Audience>,
     #[serde(default)]
-    pub description: Option<String>,
+    pub description: PatchValue<String>,
     #[serde(default)]
     pub hide_globs: Option<Vec<String>>,
     #[serde(default)]
@@ -47,9 +71,9 @@ pub struct UpdateMountRequest {
     #[serde(default)]
     pub deny_write_globs: Option<Vec<String>>,
     #[serde(default)]
-    pub max_read_bytes: Option<u64>,
+    pub max_read_bytes: PatchValue<u64>,
     #[serde(default)]
-    pub max_write_bytes: Option<u64>,
+    pub max_write_bytes: PatchValue<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -120,7 +144,11 @@ pub async fn update_mount(
         root_path: current.root_path.clone(),
         mode: request.mode.unwrap_or(current.mode),
         audience: request.audience.unwrap_or(current.audience),
-        description: request.description.or(current.description),
+        description: match request.description {
+            PatchValue::Missing => current.description,
+            PatchValue::Null => None,
+            PatchValue::Value(value) => Some(value),
+        },
         policy: MountPolicy {
             hide_globs: request.hide_globs.unwrap_or(current.policy.hide_globs),
             deny_read_globs: request
@@ -129,8 +157,16 @@ pub async fn update_mount(
             deny_write_globs: request
                 .deny_write_globs
                 .unwrap_or(current.policy.deny_write_globs),
-            max_read_bytes: request.max_read_bytes.or(current.policy.max_read_bytes),
-            max_write_bytes: request.max_write_bytes.or(current.policy.max_write_bytes),
+            max_read_bytes: match request.max_read_bytes {
+                PatchValue::Missing => current.policy.max_read_bytes,
+                PatchValue::Null => None,
+                PatchValue::Value(value) => Some(value),
+            },
+            max_write_bytes: match request.max_write_bytes {
+                PatchValue::Missing => current.policy.max_write_bytes,
+                PatchValue::Null => None,
+                PatchValue::Value(value) => Some(value),
+            },
         },
         created_at: current.created_at,
         updated_at: now,
@@ -237,7 +273,7 @@ mod tests {
             &mount.name,
             super::UpdateMountRequest {
                 mode: Some(MountMode::ReadOnly),
-                description: Some("updated".to_owned()),
+                description: super::PatchValue::Value("updated".to_owned()),
                 ..super::UpdateMountRequest::default()
             },
         )
@@ -254,6 +290,46 @@ mod tests {
         );
         assert_eq!(updated.policy.max_read_bytes, Some(100));
         assert_eq!(updated.policy.max_write_bytes, Some(50));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn update_mount_can_clear_optional_fields() -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempdir()?;
+        let db_url = format!("sqlite://{}", tempdir.path().join("memo.db").display());
+        let pool = init_pool(&DbConfig::new(db_url)).await?;
+        let repository = SqliteMountRepository::new(pool, PolicyCache::new());
+
+        let mount = Mount::new(
+            MountName::new("VaultKB")?,
+            PathBuf::from("/tmp/vault"),
+            MountMode::ReadWrite,
+            Audience::Shared,
+            Some("original".to_owned()),
+            MountPolicy {
+                max_read_bytes: Some(100),
+                max_write_bytes: Some(50),
+                ..MountPolicy::default()
+            },
+            OffsetDateTime::now_utc(),
+        )?;
+        repository.create(&mount).await?;
+
+        let updated = super::update_mount(
+            &repository,
+            &mount.name,
+            super::UpdateMountRequest {
+                description: super::PatchValue::Null,
+                max_read_bytes: super::PatchValue::Null,
+                max_write_bytes: super::PatchValue::Null,
+                ..super::UpdateMountRequest::default()
+            },
+        )
+        .await?;
+
+        assert_eq!(updated.description, None);
+        assert_eq!(updated.policy.max_read_bytes, None);
+        assert_eq!(updated.policy.max_write_bytes, None);
         Ok(())
     }
 
