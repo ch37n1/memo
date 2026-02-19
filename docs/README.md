@@ -28,6 +28,12 @@ All IPC is REST HTTP/1.1 on loopback TCP (`127.0.0.1:18301`). No external networ
 
 MVP — single-user personal tool. One human operator, one or more LLM agents, all on the same machine. No multi-user, no networked access.
 
+### Implementation Status
+
+- Phase 0 (foundation) is complete.
+- Stream B Phase 1 (`B1: memo-client`) is complete.
+- Remaining roadmap items are in progress by stream.
+
 ### Goals (v1)
 
 - Safe, policy-enforced access to named filesystem mounts

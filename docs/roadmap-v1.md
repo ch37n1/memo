@@ -13,6 +13,15 @@ Each item is a complete feature that requires its own implementation plan.
 
 ---
 
+## Current Status
+
+- Phase 0: **DONE**
+- Phase 1: **IN PROGRESS**
+- Stream B: **B1 DONE** (`memo-client`)
+- Stream A: **A1 pending/in progress** (not completed in this stream)
+
+---
+
 ## Dependency Graph
 
 ```mermaid
@@ -123,7 +132,7 @@ graph TD
 
 ---
 
-### B1: memo-client
+### B1: memo-client -- **DONE**
 
 **Scope:** Typed `reqwest`-based HTTP client library used by both CLI and memo-ui.
 

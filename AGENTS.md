@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) or other agent when 
 
 `memo` is a secure, mount-scoped, daemon-backed filesystem layer for collaborative human–agent knowledge work. It gives humans and LLM agents a shared, policy-controlled space to read, write, and build a common knowledge base.
 
-**Status:** Pre-implementation (docs/design phase). No source code exists yet — the codebase will be a Cargo workspace at the repo root.
+**Status:** In implementation. Phase 0 is complete, and Stream B Phase 1 (`B1: memo-client`) is complete.
 
 **Primary platform:** macOS. Linux is a supported secondary target. Windows is out of scope.
 
@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) or other agent when 
 
 ## Build, Test, and Lint Commands
 
-Once implemented, the project uses a Cargo workspace at the repo root:
+The project uses a Cargo workspace at the repo root:
 
 ```bash
 # Build all crates
