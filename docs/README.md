@@ -125,6 +125,7 @@ _In future, some agreements can be moved to `operations` if grow to much._
 | `docs/design/mount-registry.md` | Mount and policy logic, path-validation boundaries | Domain truth |
 | `docs/design/file-system.md` | File operation semantics, atomicity, and constraints | Domain truth |
 | `docs/design/audit.md` | Audit event model and append-only log behavior | Domain truth |
+| `docs/design/daemon-lifecycle.md` | Daemon startup/shutdown sequence and runtime lifecycle contracts | Domain truth |
 | `docs/roadmap-v1.md` | Near-term planning and sequencing | Planning truth |
 | `docs/dev-env-checklist.md` | Local engineering environment checklist | Procedural truth |
 | `docs/references/README.md` | Quick-reference index (formats, codes, contracts) | Reference truth |
@@ -133,7 +134,7 @@ _In future, some agreements can be moved to `operations` if grow to much._
 | `docs/operations/task-workflow.md` | Standard task execution workflow | Procedural truth |
 | `docs/operations/parallel-dev.md` | Collaboration guidance for parallel work | Operational truth |
 | `docs/operations/documentation.md` | Documentation conventions and taxonomy | Operational truth |
-| `docs/operations/manual-regression-v1.md` | Full manual regression test runbook for v1 release validation | Operational truth |
+| `docs/operations/manual-regression.md` | Full manual regression test runbook for v1 release validation | Operational truth |
 | `docs/archive/vision.md` | Historical vision snapshot | Historical truth |
 
 Planned directories (`decision-records/`, `development/`) will be introduced as content grows.

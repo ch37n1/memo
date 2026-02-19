@@ -320,7 +320,7 @@ graph TD
 
 ---
 
-## Phase 5 — Assembly & Testing
+## Phase 5 — Assembly & Testing -- **DONE**
 
 > A finishes the daemon (audit + lifecycle). B builds end-to-end test suites. **Sync point:** B5 requires A1–A4 to be complete (the daemon must have all endpoints). A is already on A5 by this phase, so the dependency is naturally satisfied.
 
