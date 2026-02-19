@@ -16,7 +16,7 @@ Each item is a complete feature that requires its own implementation plan.
 ## Current Status
 
 - Phase 0: **DONE**
-- Phase 1: **IN PROGRESS**
+- Phase 1: **DONE**
 - Stream B: **B1 DONE** (`memo-client`)
 - Stream A: **A1 DONE** (`memod` database layer)
 
