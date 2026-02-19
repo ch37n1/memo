@@ -383,14 +383,24 @@ fn write_stdout_bytes(bytes: &[u8]) -> Result<(), CliError> {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
+    use axum::body::Body as AxumBody;
+    use axum::extract::Query;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::routing::{delete, get, post, put};
+    use axum::{Json, Router};
     use memo_client::{
         CopyResponse, FindResponse, FindResult, FsEntry, FsEntryKind, GrepMatch, GrepResponse,
         LsResponse, StatResponse, TreeNode, TreeResponse,
     };
     use memo_core::MountPath;
+    use serde_json::{json, Value};
     use time::OffsetDateTime;
+    use tokio::net::TcpListener;
+    use tokio::task::JoinHandle;
 
     use crate::config::RuntimeConfig;
 
@@ -417,6 +427,157 @@ mod tests {
 
     fn sample_ts() -> OffsetDateTime {
         OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("timestamp should be valid")
+    }
+
+    fn runtime_for_addr(
+        json: bool,
+        host: String,
+        port: u16,
+        default_mount: Option<String>,
+    ) -> RuntimeConfig {
+        RuntimeConfig {
+            json,
+            host,
+            port,
+            token: None,
+            default_mount,
+            log_path: PathBuf::from("/tmp/memod.log"),
+        }
+    }
+
+    async fn fs_ls(Query(query): Query<HashMap<String, String>>) -> Json<Value> {
+        let path = query
+            .get("path")
+            .map_or_else(|| "VaultKB:/notes".to_owned(), Clone::clone);
+        Json(json!({
+            "path": path,
+            "entries": [
+                { "name": "a.md", "kind": "file", "size": 3, "modified_at": sample_ts() },
+                { "name": "sub", "kind": "dir", "size": null, "modified_at": sample_ts() }
+            ]
+        }))
+    }
+
+    async fn fs_tree() -> Json<Value> {
+        Json(json!({
+            "path": "VaultKB:/notes",
+            "depth": 2,
+            "truncated": false,
+            "tree": {
+                "name": "notes",
+                "kind": "dir",
+                "children": [
+                    { "name": "a.md", "kind": "file", "size": 3, "modified_at": sample_ts(), "children": [] }
+                ]
+            }
+        }))
+    }
+
+    async fn fs_stat() -> Json<Value> {
+        Json(json!({
+            "path": "VaultKB:/notes/a.md",
+            "kind": "file",
+            "size": 3,
+            "modified_at": sample_ts(),
+            "created_at": sample_ts(),
+            "memo_summary": "memo summary"
+        }))
+    }
+
+    async fn fs_read() -> impl IntoResponse {
+        (
+            StatusCode::OK,
+            [("content-type", "text/plain")],
+            AxumBody::from("abc"),
+        )
+    }
+
+    async fn fs_write() -> Json<Value> {
+        Json(json!({
+            "path": "VaultKB:/notes/out.md",
+            "written_bytes": 3
+        }))
+    }
+
+    async fn fs_mkdir() -> Json<Value> {
+        Json(json!({
+            "path": "VaultKB:/notes/new",
+            "created": true
+        }))
+    }
+
+    async fn fs_mv() -> Json<Value> {
+        Json(json!({
+            "src": "VaultKB:/notes/a.md",
+            "dst": "VaultKB:/notes/b.md"
+        }))
+    }
+
+    async fn fs_rm() -> Json<Value> {
+        Json(json!({
+            "path": "VaultKB:/notes/a.md",
+            "deleted": true
+        }))
+    }
+
+    async fn fs_cp() -> Json<Value> {
+        Json(json!({
+            "src": "VaultKB:/notes/a.md",
+            "dst": "VaultKB:/notes/c.md"
+        }))
+    }
+
+    async fn fs_grep() -> Json<Value> {
+        Json(json!({
+            "pattern": "memo",
+            "matches": [
+                { "path": "VaultKB:/notes/a.md", "line": 1, "content": "memo" }
+            ]
+        }))
+    }
+
+    async fn fs_find() -> Json<Value> {
+        Json(json!({
+            "glob": "**/*.md",
+            "results": [
+                { "path": "VaultKB:/notes/a.md", "size": 3, "modified_at": sample_ts() }
+            ]
+        }))
+    }
+
+    async fn spawn_fs_server() -> (RuntimeConfig, JoinHandle<()>) {
+        let app = Router::new()
+            .route("/v1/fs/ls", get(fs_ls))
+            .route("/v1/fs/tree", get(fs_tree))
+            .route("/v1/fs/stat", get(fs_stat))
+            .route("/v1/fs/read", get(fs_read))
+            .route("/v1/fs/write", put(fs_write))
+            .route("/v1/fs/mkdir", post(fs_mkdir))
+            .route("/v1/fs/mv", post(fs_mv))
+            .route("/v1/fs/rm", delete(fs_rm))
+            .route("/v1/fs/cp", post(fs_cp))
+            .route("/v1/fs/grep", get(fs_grep))
+            .route("/v1/fs/find", get(fs_find));
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("mock server should run");
+        });
+
+        (
+            runtime_for_addr(
+                true,
+                addr.ip().to_string(),
+                addr.port(),
+                Some("VaultKB".to_owned()),
+            ),
+            handle,
+        )
     }
 
     #[test]
@@ -669,5 +830,138 @@ mod tests {
         )
         .await;
         assert!(dir_result.is_err());
+    }
+
+    #[tokio::test]
+    async fn run_fs_commands_succeed_against_mock_server() {
+        let (cfg, server) = spawn_fs_server().await;
+
+        let local_dir = tempfile::tempdir().expect("temp dir should be created");
+        let local_file = local_dir.path().join("input.md");
+        std::fs::write(&local_file, b"abc").expect("test file should write");
+
+        let ls = run_ls(
+            &FsLsArgs {
+                path: "notes".to_owned(),
+                info: true,
+            },
+            &cfg,
+        )
+        .await;
+        assert!(ls.is_ok());
+
+        let tree = run_tree(
+            &FsTreeArgs {
+                path: "notes".to_owned(),
+                depth: Some(2),
+            },
+            &cfg,
+        )
+        .await;
+        assert!(tree.is_ok());
+
+        let cat = run_cat(
+            &FsCatArgs {
+                path: "notes/a.md".to_owned(),
+            },
+            &cfg,
+        )
+        .await;
+        assert!(cat.is_ok());
+
+        let write = run_write(
+            &FsWriteArgs {
+                path: "notes/out.md".to_owned(),
+                file: Some(local_file.clone()),
+            },
+            &cfg,
+        )
+        .await;
+        assert!(write.is_ok());
+
+        let mkdir = run_mkdir(
+            &FsMkdirArgs {
+                path: "notes/new".to_owned(),
+            },
+            &cfg,
+        )
+        .await;
+        assert!(mkdir.is_ok());
+
+        let mv = run_mv(
+            &FsMvArgs {
+                src: "notes/a.md".to_owned(),
+                dst: "notes/b.md".to_owned(),
+            },
+            &cfg,
+        )
+        .await;
+        assert!(mv.is_ok());
+
+        let rm = run_rm(
+            &FsRmArgs {
+                path: "notes/a.md".to_owned(),
+                recursive: false,
+            },
+            &cfg,
+        )
+        .await;
+        assert!(rm.is_ok());
+
+        let cp_mount = run_cp(
+            &FsCpArgs {
+                src: "VaultKB:/notes/a.md".to_owned(),
+                dst: "notes/c.md".to_owned(),
+            },
+            &cfg,
+        )
+        .await;
+        assert!(cp_mount.is_ok());
+
+        let cp_local = run_cp(
+            &FsCpArgs {
+                src: local_file.to_string_lossy().to_string(),
+                dst: "notes/local.md".to_owned(),
+            },
+            &cfg,
+        )
+        .await;
+        assert!(cp_local.is_ok());
+
+        let grep = run_grep(
+            &FsGrepArgs {
+                path: "notes".to_owned(),
+                pattern: "memo".to_owned(),
+                no_recursive: true,
+                case_insensitive: true,
+                max_results: Some(10),
+            },
+            &cfg,
+        )
+        .await;
+        assert!(grep.is_ok());
+
+        let find = run_find(
+            &FsFindArgs {
+                path: "notes".to_owned(),
+                glob: "**/*.md".to_owned(),
+                max_results: Some(10),
+            },
+            &cfg,
+        )
+        .await;
+        assert!(find.is_ok());
+
+        let info = run_info(
+            &FsInfoArgs {
+                path: "notes/a.md".to_owned(),
+            },
+            &cfg,
+        )
+        .await;
+        assert!(info.is_ok());
+
+        server.abort();
+        let _ = server.await;
     }
 }
