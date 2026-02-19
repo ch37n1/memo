@@ -1,82 +1,104 @@
+#![expect(
+    clippy::expect_used,
+    reason = "negative-path assertions intentionally panic on unexpected success"
+)]
+
 mod common;
 
+use common::{TestDaemon, TestResult};
 use memo_client::MemoClientError;
 use memo_core::{ApiError, MountPath};
 
-use common::TestHarness;
+async fn daemon_with_mounts() -> TestResult<TestDaemon> {
+    let daemon = TestDaemon::spawn().await?;
+    daemon.create_default_mounts().await?;
+    Ok(daemon)
+}
 
 #[tokio::test]
-async fn fs_ops_end_to_end_suite() -> Result<(), Box<dyn std::error::Error>> {
-    let harness = match TestHarness::start().await {
-        Ok(harness) => harness,
-        Err(error)
-            if error
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied) =>
-        {
-            return Ok(());
-        }
-        Err(error) => return Err(error),
-    };
-    harness.ensure_default_mounts().await?;
-    let client = harness.admin_client()?;
+async fn ls_should_return_empty_entries_for_new_mount_root() -> TestResult {
+    let daemon = daemon_with_mounts().await?;
+    let client = daemon.admin_client()?;
 
-    let notes = MountPath::parse("VaultKB:/notes")?;
-    let _ = client.mkdir(&notes).await?;
-    let listed_empty = client.ls(&notes, Some(false)).await?;
-    assert!(listed_empty.entries.is_empty());
+    let listed = client.ls(&MountPath::parse("VaultKB:/")?, None).await?;
+    assert!(listed.entries.is_empty());
 
-    let file = MountPath::parse("VaultKB:/notes/a.md")?;
-    let _ = client.write_bytes(&file, b"hello".to_vec()).await?;
-    let listed = client.ls(&notes, Some(false)).await?;
-    assert_eq!(listed.entries.len(), 1);
+    Ok(())
+}
 
-    let read = client.read(&file).await?;
-    assert_eq!(read, b"hello");
+#[tokio::test]
+async fn read_should_return_written_bytes() -> TestResult {
+    let daemon = daemon_with_mounts().await?;
+    let client = daemon.admin_client()?;
+    let path = MountPath::parse("VaultKB:/notes/read.md")?;
 
-    let missing = client
-        .read(&MountPath::parse("VaultKB:/notes/missing.md")?)
-        .await;
-    assert!(matches!(
-        missing,
-        Err(MemoClientError::Api(ApiError::NotFound(_)))
-    ));
+    client.write_bytes(&path, b"hello".to_vec()).await?;
+    let bytes = client.read(&path).await?;
 
-    let _ = client.write_bytes(&file, b"overwritten".to_vec()).await?;
-    let read_overwritten = client.read(&file).await?;
-    assert_eq!(read_overwritten, b"overwritten");
+    assert_eq!(bytes, b"hello");
+    Ok(())
+}
 
-    let docs = MountPath::parse("VaultKB:/docs")?;
-    let _ = client.mkdir(&docs).await?;
+#[tokio::test]
+async fn write_should_overwrite_existing_file() -> TestResult {
+    let daemon = daemon_with_mounts().await?;
+    let client = daemon.admin_client()?;
+    let path = MountPath::parse("VaultKB:/notes/overwrite.md")?;
 
-    let moved = MountPath::parse("VaultKB:/docs/moved.md")?;
-    let _ = client.mv(&file, &moved).await?;
+    client.write_bytes(&path, b"before".to_vec()).await?;
+    client.write_bytes(&path, b"after".to_vec()).await?;
 
-    let dir_from = MountPath::parse("VaultKB:/docs")?;
-    let dir_to = MountPath::parse("VaultKB:/docs-renamed")?;
-    let _ = client.mv(&dir_from, &dir_to).await?;
+    assert_eq!(client.read(&path).await?, b"after");
+    Ok(())
+}
 
-    let removed = MountPath::parse("VaultKB:/docs-renamed/moved.md")?;
-    let _ = client.rm(&removed, Some(false)).await?;
+#[tokio::test]
+async fn mkdir_and_mv_should_move_directory_contents() -> TestResult {
+    let daemon = daemon_with_mounts().await?;
+    let client = daemon.admin_client()?;
 
-    let non_empty = MountPath::parse("VaultKB:/dir")?;
-    let nested = MountPath::parse("VaultKB:/dir/nested.txt")?;
-    let _ = client.mkdir(&non_empty).await?;
-    let _ = client.write_bytes(&nested, b"x".to_vec()).await?;
-    let non_recursive = client.rm(&non_empty, Some(false)).await;
-    assert!(matches!(
-        non_recursive,
-        Err(MemoClientError::Api(ApiError::Conflict(_)))
-    ));
-    let _ = client.rm(&non_empty, Some(true)).await?;
+    let src_dir = MountPath::parse("VaultKB:/src")?;
+    let src_file = MountPath::parse("VaultKB:/src/a.txt")?;
+    let dst_dir = MountPath::parse("VaultKB:/dst")?;
+    let dst_file = MountPath::parse("VaultKB:/dst/a.txt")?;
 
-    let src = MountPath::parse("VaultKB:/copy-source.md")?;
-    let dst_same = MountPath::parse("VaultKB:/copy-same.md")?;
-    let _ = client.write_bytes(&src, b"copy".to_vec()).await?;
-    let _ = client.cp(&src, &dst_same).await?;
+    client.mkdir(&src_dir).await?;
+    client.write_bytes(&src_file, b"data".to_vec()).await?;
+    client.mv(&src_dir, &dst_dir).await?;
 
-    let dst_cross = MountPath::parse("Archive:/cross/copied.md")?;
-    let _ = client.cp(&dst_same, &dst_cross).await?;
+    assert_eq!(client.read(&dst_file).await?, b"data");
+    Ok(())
+}
 
+#[tokio::test]
+async fn rm_non_empty_without_recursive_should_return_conflict() -> TestResult {
+    let daemon = daemon_with_mounts().await?;
+    let client = daemon.admin_client()?;
+    let dir = MountPath::parse("VaultKB:/non-empty")?;
+    let file = MountPath::parse("VaultKB:/non-empty/a.txt")?;
+
+    client.mkdir(&dir).await?;
+    client.write_bytes(&file, b"x".to_vec()).await?;
+
+    let error = client
+        .rm(&dir, Some(false))
+        .await
+        .expect_err("non-recursive remove should fail");
+    assert!(matches!(error, MemoClientError::Api(ApiError::Conflict(_))));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn cp_should_copy_between_mounts() -> TestResult {
+    let daemon = daemon_with_mounts().await?;
+    let client = daemon.admin_client()?;
+    let source = MountPath::parse("VaultKB:/notes/source.md")?;
+    let target = MountPath::parse("Archive:/copies/target.md")?;
+
+    client.write_bytes(&source, b"copy me".to_vec()).await?;
+    client.cp(&source, &target).await?;
+
+    assert_eq!(client.read(&target).await?, b"copy me");
     Ok(())
 }

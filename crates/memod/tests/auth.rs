@@ -1,70 +1,124 @@
+#![expect(
+    clippy::expect_used,
+    reason = "negative-path assertions intentionally panic on unexpected success"
+)]
+
 mod common;
 
-use memo_client::{MemoClient, MemoClientError};
-use memo_core::ApiError;
+use common::{scope_set, TestDaemon, TestResult};
+use memo_client::{CreateTokenRequest, MemoClientError};
+use memo_core::{ApiError, MountPath};
 use time::{Duration, OffsetDateTime};
 
-use common::TestHarness;
+async fn daemon_with_mounts() -> TestResult<TestDaemon> {
+    let daemon = TestDaemon::spawn().await?;
+    daemon.create_default_mounts().await?;
+    Ok(daemon)
+}
 
 #[tokio::test]
-async fn auth_end_to_end_suite() -> Result<(), Box<dyn std::error::Error>> {
-    let harness = match TestHarness::start().await {
-        Ok(harness) => harness,
-        Err(error)
-            if error
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied) =>
-        {
-            return Ok(());
-        }
-        Err(error) => return Err(error),
-    };
-    harness.ensure_default_mounts().await?;
+async fn missing_token_should_be_rejected() -> TestResult {
+    let daemon = daemon_with_mounts().await?;
+    let client = daemon.client_with_token(None)?;
 
-    let no_token_client = MemoClient::for_base_url(&harness.base_url)?;
-    let no_token = no_token_client.list_mounts().await;
+    let error = client
+        .list_tokens()
+        .await
+        .expect_err("missing token should fail");
     assert!(matches!(
-        no_token,
-        Err(MemoClientError::Api(ApiError::AuthRequired))
+        error,
+        MemoClientError::Api(ApiError::AuthRequired)
     ));
 
-    let invalid_client = harness.client_with_token("memo_invalid")?;
-    let invalid = invalid_client.list_mounts().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_token_should_be_rejected() -> TestResult {
+    let daemon = daemon_with_mounts().await?;
+    let client = daemon.client_with_token(Some("memo_invalid_token".to_owned()))?;
+
+    let error = client
+        .list_tokens()
+        .await
+        .expect_err("invalid token should fail");
     assert!(matches!(
-        invalid,
-        Err(MemoClientError::Api(ApiError::TokenInvalid))
+        error,
+        MemoClientError::Api(ApiError::TokenInvalid)
     ));
 
-    let expired_token = harness
-        .create_token(
-            "expired",
-            &["meta:*:read"],
-            Some(OffsetDateTime::now_utc() - Duration::minutes(5)),
-        )
+    Ok(())
+}
+
+#[tokio::test]
+async fn expired_token_should_be_rejected() -> TestResult {
+    let daemon = daemon_with_mounts().await?;
+    let admin = daemon.admin_client()?;
+    let expires_at = OffsetDateTime::now_utc() - Duration::minutes(1);
+
+    let created = admin
+        .create_token(&CreateTokenRequest {
+            name: "expired".to_owned(),
+            scopes: scope_set(&["meta:*:read"])?,
+            expires_at: Some(expires_at),
+        })
         .await?;
-    let expired_client = harness.client_with_token(expired_token)?;
-    let expired = expired_client.list_mounts().await;
+    let expired_client = daemon.client_with_token(Some(created.token))?;
+
+    let error = expired_client
+        .list_mounts()
+        .await
+        .expect_err("expired token should fail");
     assert!(matches!(
-        expired,
-        Err(MemoClientError::Api(ApiError::TokenExpired))
+        error,
+        MemoClientError::Api(ApiError::TokenExpired)
     ));
 
-    let wrong_scope = harness
-        .create_token("reader", &["fs:VaultKB:read"], None)
+    Ok(())
+}
+
+#[tokio::test]
+async fn wrong_scope_should_be_rejected() -> TestResult {
+    let daemon = daemon_with_mounts().await?;
+    let admin = daemon.admin_client()?;
+
+    let created = admin
+        .create_token(&CreateTokenRequest {
+            name: "readonly".to_owned(),
+            scopes: scope_set(&["fs:VaultKB:read"])?,
+            expires_at: None,
+        })
         .await?;
-    let wrong_scope_client = harness.client_with_token(wrong_scope)?;
-    let wrong_scope_result = wrong_scope_client.list_mounts().await;
+    let read_only_client = daemon.client_with_token(Some(created.token))?;
+
+    let error = read_only_client
+        .mkdir(&MountPath::parse("VaultKB:/nope")?)
+        .await
+        .expect_err("write with read-only scope should fail");
     assert!(matches!(
-        wrong_scope_result,
-        Err(MemoClientError::Api(ApiError::PermissionDenied))
+        error,
+        MemoClientError::Api(ApiError::PermissionDenied)
     ));
 
-    let valid_token = harness
-        .create_token("meta-reader", &["meta:*:read"], None)
+    Ok(())
+}
+
+#[tokio::test]
+async fn correct_scope_should_succeed() -> TestResult {
+    let daemon = daemon_with_mounts().await?;
+    let admin = daemon.admin_client()?;
+
+    let created = admin
+        .create_token(&CreateTokenRequest {
+            name: "reader".to_owned(),
+            scopes: scope_set(&["fs:VaultKB:read"])?,
+            expires_at: None,
+        })
         .await?;
-    let valid_client = harness.client_with_token(valid_token)?;
-    let mounts = valid_client.list_mounts().await?;
-    assert!(!mounts.is_empty());
+    let reader = daemon.client_with_token(Some(created.token))?;
+
+    let listed = reader.ls(&MountPath::parse("VaultKB:/")?, None).await?;
+    assert!(listed.entries.is_empty());
 
     Ok(())
 }

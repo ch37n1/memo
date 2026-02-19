@@ -439,6 +439,7 @@ impl FileSystemService {
         bytes: &[u8],
     ) -> Result<WriteResponse, ApiError> {
         let mount = self.load_mount(path.mount()).await?;
+        ensure_mount_writable(&mount)?;
         let write_size = u64::try_from(bytes.len())
             .map_err(|_| ApiError::Internal("payload too large".to_owned()))?;
 
@@ -458,6 +459,7 @@ impl FileSystemService {
 
     pub async fn mkdir(&self, path: &MountPath) -> Result<MkdirResponse, ApiError> {
         let mount = self.load_mount(path.mount()).await?;
+        ensure_mount_writable(&mount)?;
         let resolved = self
             .policy_engine
             .resolve_write_path(&mount, path.relative(), 0)
@@ -480,6 +482,7 @@ impl FileSystemService {
         }
 
         let mount = self.load_mount(src.mount()).await?;
+        ensure_mount_writable(&mount)?;
         let src_resolved = self
             .policy_engine
             .resolve_read_path(&mount, src.relative(), None)
@@ -506,6 +509,7 @@ impl FileSystemService {
 
     pub async fn rm(&self, path: &MountPath, recursive: bool) -> Result<RemoveResponse, ApiError> {
         let mount = self.load_mount(path.mount()).await?;
+        ensure_mount_writable(&mount)?;
         let resolved = self
             .policy_engine
             .resolve_write_path(&mount, path.relative(), 0)
@@ -546,6 +550,7 @@ impl FileSystemService {
     pub async fn cp(&self, src: &MountPath, dst: &MountPath) -> Result<CopyResponse, ApiError> {
         let src_mount = self.load_mount(src.mount()).await?;
         let dst_mount = self.load_mount(dst.mount()).await?;
+        ensure_mount_writable(&dst_mount)?;
 
         let src_resolved = self
             .policy_engine
@@ -761,6 +766,13 @@ fn modified_at_std(metadata: &std::fs::Metadata) -> OffsetDateTime {
 
 fn created_at(metadata: &std::fs::Metadata) -> Option<OffsetDateTime> {
     metadata.created().ok().map(OffsetDateTime::from)
+}
+
+fn ensure_mount_writable(mount: &Mount) -> Result<(), ApiError> {
+    if matches!(mount.mode, memo_core::MountMode::ReadOnly) {
+        return Err(ApiError::PermissionDenied);
+    }
+    Ok(())
 }
 
 fn parse_summary_from_index(index_path: &Path) -> Option<String> {

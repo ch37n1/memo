@@ -1,191 +1,182 @@
+use std::io;
 use std::net::TcpListener;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::str::FromStr;
 use std::time::Duration;
 
-use memo_client::{CreateMountRequest, CreateTokenRequest, MemoClient, MemoClientConfig};
+use memo_client::{CreateMountRequest, MemoClient, MemoClientConfig};
 use memo_core::{Audience, MountMode, MountName, Scope, ScopeSet};
 use tempfile::TempDir;
-use time::OffsetDateTime;
+use tokio::time::sleep;
 
-pub struct TestHarness {
-    _tempdir: TempDir,
+type TestError = Box<dyn std::error::Error + Send + Sync>;
+
+pub type TestResult<T = ()> = Result<T, TestError>;
+
+pub struct TestDaemon {
+    _workspace: TempDir,
     child: Child,
     pub base_url: String,
-    pub bootstrap_token: String,
-    pub mount_root: PathBuf,
+    pub admin_token: String,
+    pub vault_root: PathBuf,
     pub archive_root: PathBuf,
 }
 
-impl TestHarness {
-    pub async fn start() -> Result<Self, Box<dyn std::error::Error>> {
-        let tempdir = tempfile::tempdir()?;
-        let work = tempdir.path();
-        let config_home = work.join("xdg-config");
-        let data_home = work.join("xdg-data");
-        let state_home = work.join("xdg-state");
-        let runtime_dir = work.join("xdg-runtime");
-        std::fs::create_dir_all(&config_home)?;
-        std::fs::create_dir_all(&data_home)?;
-        std::fs::create_dir_all(&state_home)?;
-        std::fs::create_dir_all(&runtime_dir)?;
+impl TestDaemon {
+    pub async fn spawn() -> TestResult<Self> {
+        let workspace = tempfile::tempdir()?;
+        let port = reserve_tcp_port()?;
+        let bind_addr = format!("127.0.0.1:{port}");
+        let base_url = format!("http://{bind_addr}");
 
-        let db_path = work.join("memo.db");
-        let bootstrap_path = work.join("bootstrap.token");
-        let mount_root = work.join("vault");
-        let archive_root = work.join("archive");
-        std::fs::create_dir_all(&mount_root)?;
+        let db_url = format!("sqlite://{}", workspace.path().join("memo.db").display());
+        let bootstrap_path = workspace.path().join("bootstrap.token");
+        let vault_root = workspace.path().join("vault");
+        let archive_root = workspace.path().join("archive");
+        std::fs::create_dir_all(&vault_root)?;
         std::fs::create_dir_all(&archive_root)?;
 
-        let port = reserve_port()?;
-        let base_url = format!("http://127.0.0.1:{port}");
-
-        let mut child = Command::new(env!("CARGO_BIN_EXE_memod"))
-            .env("HOME", work)
-            .env("XDG_CONFIG_HOME", &config_home)
-            .env("XDG_DATA_HOME", &data_home)
-            .env("XDG_STATE_HOME", &state_home)
-            .env("XDG_RUNTIME_DIR", &runtime_dir)
-            .env("MEMOD_BIND_ADDR", format!("127.0.0.1:{port}"))
-            .env(
-                "MEMOD_DATABASE_URL",
-                format!("sqlite://{}", db_path.display()),
-            )
+        let child = Command::new(env!("CARGO_BIN_EXE_memod"))
+            .env("MEMOD_BIND_ADDR", &bind_addr)
+            .env("MEMOD_DATABASE_URL", &db_url)
             .env("MEMOD_BOOTSTRAP_TOKEN_PATH", &bootstrap_path)
-            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()?;
 
-        wait_until_ready(&mut child, &base_url, &bootstrap_path).await?;
-        let bootstrap_token = std::fs::read_to_string(&bootstrap_path)?.trim().to_owned();
+        wait_until_bootstrap_file(&bootstrap_path).await?;
+        let admin_token = tokio::fs::read_to_string(&bootstrap_path)
+            .await?
+            .trim()
+            .to_owned();
+        wait_until_healthy(&base_url).await?;
 
         Ok(Self {
-            _tempdir: tempdir,
+            _workspace: workspace,
             child,
             base_url,
-            bootstrap_token,
-            mount_root,
+            admin_token,
+            vault_root,
             archive_root,
         })
     }
 
-    pub fn admin_client(&self) -> Result<MemoClient, memo_client::MemoClientError> {
+    pub fn admin_client(&self) -> TestResult<MemoClient> {
         MemoClient::new(MemoClientConfig {
             base_url: self.base_url.clone(),
-            token: Some(self.bootstrap_token.clone()),
+            token: Some(self.admin_token.clone()),
             ..MemoClientConfig::default()
         })
+        .map_err(Into::into)
     }
 
     #[allow(dead_code)]
-    pub fn client_with_token(
-        &self,
-        token: impl Into<String>,
-    ) -> Result<MemoClient, memo_client::MemoClientError> {
+    pub fn client_with_token(&self, token: impl Into<Option<String>>) -> TestResult<MemoClient> {
         MemoClient::new(MemoClientConfig {
             base_url: self.base_url.clone(),
-            token: Some(token.into()),
+            token: token.into(),
             ..MemoClientConfig::default()
         })
+        .map_err(Into::into)
     }
 
-    #[allow(dead_code)]
-    pub async fn ensure_default_mounts(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let client = self.admin_client()?;
-        ensure_mount(&client, "VaultKB", &self.mount_root, MountMode::ReadWrite).await?;
-        ensure_mount(&client, "Archive", &self.archive_root, MountMode::ReadWrite).await?;
-        Ok(())
+    pub async fn create_default_mounts(&self) -> TestResult {
+        self.create_mount(
+            MountName::new("VaultKB")?,
+            self.vault_root.clone(),
+            MountMode::ReadWrite,
+            vec![],
+            vec![],
+            vec![],
+        )
+        .await?;
+        self.create_mount(
+            MountName::new("Archive")?,
+            self.archive_root.clone(),
+            MountMode::ReadWrite,
+            vec![],
+            vec![],
+            vec![],
+        )
+        .await
     }
 
-    #[allow(dead_code)]
-    pub async fn create_token(
+    pub async fn create_mount(
         &self,
-        name: &str,
-        scopes: &[&str],
-        expires_at: Option<OffsetDateTime>,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+        name: MountName,
+        root_path: PathBuf,
+        mode: MountMode,
+        hide_globs: Vec<String>,
+        deny_read_globs: Vec<String>,
+        deny_write_globs: Vec<String>,
+    ) -> TestResult {
         let client = self.admin_client()?;
-        let parsed = scopes
-            .iter()
-            .map(|scope| scope.parse::<Scope>())
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let created = client
-            .create_token(&CreateTokenRequest {
-                name: name.to_owned(),
-                scopes: ScopeSet::new(parsed),
-                expires_at,
+        client
+            .create_mount(&CreateMountRequest {
+                name,
+                root_path,
+                mode,
+                audience: Audience::Shared,
+                description: None,
+                hide_globs,
+                deny_read_globs,
+                deny_write_globs,
+                max_read_bytes: None,
+                max_write_bytes: None,
             })
             .await?;
-
-        Ok(created.token)
+        Ok(())
     }
 }
 
-impl Drop for TestHarness {
+impl Drop for TestDaemon {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let is_running = self.child.try_wait().ok().flatten().is_none();
+        if is_running {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
     }
 }
 
 #[allow(dead_code)]
-async fn ensure_mount(
-    client: &MemoClient,
-    name: &str,
-    path: &Path,
-    mode: MountMode,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mount_name = MountName::new(name)?;
-
-    if client.get_mount(&mount_name).await.is_ok() {
-        return Ok(());
-    }
-
-    let _ = client
-        .create_mount(&CreateMountRequest {
-            name: mount_name,
-            root_path: path.to_path_buf(),
-            mode,
-            audience: Audience::Shared,
-            description: None,
-            hide_globs: vec![],
-            deny_read_globs: vec![],
-            deny_write_globs: vec![],
-            max_read_bytes: None,
-            max_write_bytes: None,
-        })
-        .await?;
-
-    Ok(())
+pub fn scope_set(scopes: &[&str]) -> TestResult<ScopeSet> {
+    let parsed = scopes
+        .iter()
+        .map(|scope| Scope::from_str(scope))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ScopeSet::new(parsed))
 }
 
-fn reserve_port() -> Result<u16, std::io::Error> {
+fn reserve_tcp_port() -> io::Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
-    Ok(port)
+    Ok(listener.local_addr()?.port())
 }
 
-async fn wait_until_ready(
-    child: &mut Child,
-    base_url: &str,
-    bootstrap_path: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let client = MemoClient::for_base_url(base_url)?;
-
-    for _ in 0..200 {
-        if let Some(status) = child.try_wait()? {
-            return Err(format!("memod exited early with status {status}").into());
-        }
-
-        if bootstrap_path.exists() && client.health().await.is_ok() {
+async fn wait_until_bootstrap_file(path: &std::path::Path) -> TestResult {
+    let max_attempts = 200_u16;
+    for _ in 0..max_attempts {
+        if path.exists() {
             return Ok(());
         }
-
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        sleep(Duration::from_millis(25)).await;
     }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "timed out waiting for bootstrap token file",
+    )
+    .into())
+}
 
-    Err("memod did not become ready in time".into())
+async fn wait_until_healthy(base_url: &str) -> TestResult {
+    let client = MemoClient::for_base_url(base_url.to_owned())?;
+    let max_attempts = 200_u16;
+    for _ in 0..max_attempts {
+        if client.health().await.is_ok() {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+    Err(io::Error::new(io::ErrorKind::TimedOut, "timed out waiting for health").into())
 }

@@ -1,79 +1,90 @@
+#![expect(
+    clippy::expect_used,
+    reason = "negative-path assertions intentionally panic on unexpected success"
+)]
+
 mod common;
 
+use common::{TestDaemon, TestResult};
 use memo_client::MemoClientError;
 use memo_core::{ApiError, MountPath};
 
-use common::TestHarness;
+async fn daemon_with_mounts() -> TestResult<TestDaemon> {
+    let daemon = TestDaemon::spawn().await?;
+    daemon.create_default_mounts().await?;
+    Ok(daemon)
+}
 
 #[tokio::test]
-async fn atomic_write_concurrent_and_cleanup_suite() -> Result<(), Box<dyn std::error::Error>> {
-    let harness = match TestHarness::start().await {
-        Ok(harness) => harness,
-        Err(error)
-            if error
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied) =>
-        {
-            return Ok(());
-        }
-        Err(error) => return Err(error),
-    };
-    harness.ensure_default_mounts().await?;
-    let client = harness.admin_client()?;
+async fn concurrent_writes_should_leave_file_in_valid_state() -> TestResult {
+    let daemon = daemon_with_mounts().await?;
+    let client = daemon.admin_client()?;
+    let path = MountPath::parse("VaultKB:/concurrent/data.bin")?;
 
-    let dir_target = harness.mount_root.join("dir-target");
-    std::fs::create_dir_all(&dir_target)?;
+    let payload_a = vec![b'A'; 256 * 1024];
+    let payload_b = vec![b'B'; 256 * 1024];
 
-    let interrupted = client
-        .write_bytes(&MountPath::parse("VaultKB:/dir-target")?, b"x".to_vec())
-        .await;
-    assert!(matches!(
-        interrupted,
-        Err(MemoClientError::Api(ApiError::Internal(_)))
-    ));
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let client_a = client.clone();
+        let path_a = path.clone();
+        let bytes_a = payload_a.clone();
+        handles.push(tokio::spawn(async move {
+            client_a.write_bytes(&path_a, bytes_a).await
+        }));
 
-    let temp_leftovers = std::fs::read_dir(&harness.mount_root)?
-        .flatten()
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".memo_tmp_")
-        })
-        .count();
-    assert_eq!(temp_leftovers, 0);
-
-    let path = MountPath::parse("VaultKB:/race/file.txt")?;
-    let mut tasks = Vec::new();
-    for idx in 0..12 {
-        let client = harness.admin_client()?;
-        let path = path.clone();
-        tasks.push(tokio::spawn(async move {
-            let body = format!("payload-{idx}").into_bytes();
-            client.write_bytes(&path, body.clone()).await.map(|_| body)
+        let client_b = client.clone();
+        let path_b = path.clone();
+        let bytes_b = payload_b.clone();
+        handles.push(tokio::spawn(async move {
+            client_b.write_bytes(&path_b, bytes_b).await
         }));
     }
 
-    let mut expected = Vec::new();
-    for task in tasks {
-        let body = task.await??;
-        expected.push(body);
+    for handle in handles {
+        handle.await??;
     }
 
-    let final_read = client.read(&path).await?;
-    assert!(expected.iter().any(|candidate| candidate == &final_read));
+    let final_bytes = client.read(&path).await?;
+    assert!(final_bytes == payload_a || final_bytes == payload_b);
 
-    let race_dir = harness.mount_root.join("race");
-    let race_temps = std::fs::read_dir(race_dir)?
-        .flatten()
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".memo_tmp_")
-        })
-        .count();
-    assert_eq!(race_temps, 0);
+    let concurrent_dir = daemon.vault_root.join("concurrent");
+    let mut entries = tokio::fs::read_dir(concurrent_dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name().to_string_lossy().to_string();
+        assert!(
+            !name.starts_with(".memo_tmp_"),
+            "dangling temp file: {name}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_write_should_cleanup_temp_file() -> TestResult {
+    let daemon = daemon_with_mounts().await?;
+    let target_dir = daemon.vault_root.join("notes").join("dir-target");
+    tokio::fs::create_dir_all(&target_dir).await?;
+
+    let client = daemon.admin_client()?;
+    let write = client
+        .write_bytes(
+            &MountPath::parse("VaultKB:/notes/dir-target")?,
+            b"data".to_vec(),
+        )
+        .await;
+    let error = write.expect_err("writing into existing directory should fail");
+    assert!(matches!(error, MemoClientError::Api(ApiError::Internal(_))));
+
+    let mut entries = tokio::fs::read_dir(daemon.vault_root.join("notes")).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name().to_string_lossy().to_string();
+        assert!(
+            !name.starts_with(".memo_tmp_"),
+            "dangling temp file: {name}"
+        );
+    }
 
     Ok(())
 }
