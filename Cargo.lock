@@ -1222,6 +1222,7 @@ dependencies = [
  "memo-core",
  "rand 0.9.2",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "sqlx",

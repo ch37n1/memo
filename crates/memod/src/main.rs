@@ -1,17 +1,18 @@
 // memod: daemon process. Owns all filesystem I/O.
 // Serves an axum/tokio HTTP API on 127.0.0.1:18301.
 
+pub mod audit;
 pub mod auth;
 pub mod db;
 pub mod fs;
 pub mod mount_registry;
 
-use std::future::pending;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path as StdPath, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
+use audit::{AuditQuery, AuditRecord, AuditResponse, AuditService};
 use auth::middleware::{auth_middleware, AuthState, VerifiedToken};
 use auth::repository::SqliteTokenRepository;
 use axum::body::Body;
@@ -23,9 +24,11 @@ use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
 use memo_core::repositories::MountRepository;
 use memo_core::repositories::TokenRepository;
-use memo_core::{ApiError, AuthError, DbError, MountPath, TokenId};
+use memo_core::{
+    ApiError, AuthError, DbError, DenialReason, DomainEvent, MetaScope, MountPath, Scope, TokenId,
+};
 use mount_registry::repository::{PolicyCache, SqliteMountRepository};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
@@ -33,23 +36,86 @@ use uuid::Uuid;
 struct AppConfig {
     bind_addr: String,
     database_url: String,
+    log_level: String,
+    log_path: PathBuf,
+    write_fsync: bool,
+    write_dir_sync: bool,
+    pid_file_path: PathBuf,
+    audit_log_path: PathBuf,
+    max_audit_log_rows: usize,
     bootstrap_token_path: PathBuf,
 }
 
 impl AppConfig {
-    fn from_env() -> Self {
-        let bind_addr =
-            std::env::var("MEMOD_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:18301".to_owned());
-        let database_url =
-            std::env::var("MEMOD_DATABASE_URL").unwrap_or_else(|_| "sqlite://memo.db".to_owned());
+    fn load() -> Result<Self, ApiError> {
+        ensure_xdg_dirs().map_err(|error| ApiError::Internal(error.to_string()))?;
+        let from_file =
+            MemodFileConfig::load().map_err(|error| ApiError::Internal(error.to_string()))?;
+        let defaults = Defaults::detect();
+
+        let bind_addr = std::env::var("MEMOD_BIND_ADDR")
+            .ok()
+            .or_else(|| {
+                from_file
+                    .daemon
+                    .as_ref()
+                    .and_then(|daemon| daemon.bind_addr.clone())
+            })
+            .unwrap_or_else(|| "127.0.0.1:18301".to_owned());
+        let db_path = from_file.db_path.unwrap_or_else(|| defaults.db.clone());
+        let database_url = std::env::var("MEMOD_DATABASE_URL")
+            .unwrap_or_else(|_| format!("sqlite://{}", db_path.display()));
+        let log_path = from_file.log_path.unwrap_or_else(|| defaults.log.clone());
         let bootstrap_token_path = std::env::var("MEMOD_BOOTSTRAP_TOKEN_PATH")
-            .map_or_else(|_| default_bootstrap_token_path(), PathBuf::from);
+            .ok()
+            .map_or_else(|| defaults.bootstrap_token.clone(), PathBuf::from);
+        let log_level = from_file
+            .daemon
+            .as_ref()
+            .and_then(|daemon| daemon.log_level.clone())
+            .unwrap_or_else(|| "info".to_owned());
+        let max_audit_log_rows = from_file
+            .daemon
+            .as_ref()
+            .and_then(|daemon| daemon.limits.as_ref())
+            .and_then(|limits| limits.max_audit_log_rows)
+            .unwrap_or(100_000);
+        let write_fsync = from_file
+            .daemon
+            .as_ref()
+            .and_then(|daemon| daemon.write.as_ref())
+            .and_then(|write| write.fsync)
+            .unwrap_or(true);
+        let write_dir_sync = from_file
+            .daemon
+            .as_ref()
+            .and_then(|daemon| daemon.write.as_ref())
+            .and_then(|write| write.dir_sync)
+            .unwrap_or(true);
 
         Self {
             bind_addr,
             database_url,
+            log_level,
+            log_path,
+            write_fsync,
+            write_dir_sync,
+            pid_file_path: defaults.pid_file,
+            audit_log_path: defaults.audit_log,
+            max_audit_log_rows,
             bootstrap_token_path,
         }
+        .validate()
+    }
+
+    fn validate(self) -> Result<Self, ApiError> {
+        if self.max_audit_log_rows == 0 {
+            return Err(ApiError::InvalidPath(
+                "daemon.limits.max_audit_log_rows must be greater than zero".to_owned(),
+            ));
+        }
+
+        Ok(self)
     }
 }
 
@@ -58,6 +124,76 @@ struct AppState {
     token_repository: Arc<SqliteTokenRepository>,
     mount_repository: Arc<SqliteMountRepository>,
     file_system_service: Arc<fs::ops::FileSystemService>,
+    audit_service: Arc<AuditService>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct MemodFileConfig {
+    #[serde(default)]
+    daemon: Option<DaemonConfig>,
+    #[serde(default)]
+    db_path: Option<PathBuf>,
+    #[serde(default)]
+    log_path: Option<PathBuf>,
+}
+
+impl MemodFileConfig {
+    fn load() -> Result<Self, std::io::Error> {
+        let path = default_config_path();
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+
+        let body = std::fs::read_to_string(path)?;
+        Ok(parse_memod_config(&body))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct DaemonConfig {
+    #[serde(default)]
+    bind_addr: Option<String>,
+    #[serde(default)]
+    log_level: Option<String>,
+    #[serde(default)]
+    write: Option<DaemonWriteConfig>,
+    #[serde(default)]
+    limits: Option<DaemonLimits>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct DaemonWriteConfig {
+    #[serde(default)]
+    fsync: Option<bool>,
+    #[serde(default)]
+    dir_sync: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct DaemonLimits {
+    #[serde(default)]
+    max_audit_log_rows: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct Defaults {
+    db: PathBuf,
+    log: PathBuf,
+    audit_log: PathBuf,
+    bootstrap_token: PathBuf,
+    pid_file: PathBuf,
+}
+
+impl Defaults {
+    fn detect() -> Self {
+        Self {
+            db: xdg_data_home().join("memo/memo.db"),
+            log: xdg_state_home().join("memo/memod.log"),
+            audit_log: xdg_state_home().join("memo/audit.log"),
+            bootstrap_token: default_bootstrap_token_path(),
+            pid_file: default_pid_file_path(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -143,7 +279,16 @@ impl IntoResponse for HttpError {
 
 #[tokio::main]
 async fn main() {
-    if let Err(error) = run(AppConfig::from_env()).await {
+    let config = match AppConfig::load() {
+        Ok(config) => config,
+        Err(error) => {
+            let mut stderr = std::io::stderr();
+            let _ = writeln!(stderr, "{error}");
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(error) = run(config).await {
         let mut stderr = std::io::stderr();
         let _ = writeln!(stderr, "{error}");
         std::process::exit(1);
@@ -151,9 +296,17 @@ async fn main() {
 }
 
 async fn run(config: AppConfig) -> Result<(), ApiError> {
+    init_logging(&config)?;
+    let _pid_file = PidFileGuard::create(&config.pid_file_path)
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+
     let pool = db::init_pool(&db::DbConfig::new(config.database_url)).await?;
     let token_repository = Arc::new(SqliteTokenRepository::new(pool.clone()));
     let mount_repository = Arc::new(SqliteMountRepository::new(pool, PolicyCache::new()));
+    let audit_service = Arc::new(
+        AuditService::new(config.audit_log_path.clone())
+            .map_err(|error| ApiError::Internal(error.to_string()))?,
+    );
 
     if auth::bootstrap_admin_token_if_needed(&token_repository, &config.bootstrap_token_path)
         .await?
@@ -167,20 +320,37 @@ async fn run(config: AppConfig) -> Result<(), ApiError> {
         );
     }
 
+    if let Err(error) = audit_service
+        .prune_if_exceeds(config.max_audit_log_rows)
+        .await
+    {
+        let mut stderr = std::io::stderr();
+        let _ = writeln!(stderr, "failed to prune audit log at startup: {error}");
+    }
+
     let state = AppState {
-        file_system_service: Arc::new(fs::ops::FileSystemService::new(Arc::clone(
-            &mount_repository,
-        ))),
+        file_system_service: Arc::new(fs::ops::FileSystemService::new(
+            Arc::clone(&mount_repository),
+            fs::atomic::AtomicWriteOptions {
+                fsync: config.write_fsync,
+                dir_sync: config.write_dir_sync,
+            },
+        )),
         token_repository,
         mount_repository,
+        audit_service,
     };
 
     let router = app_router(&state);
     let listener = tokio::net::TcpListener::bind(&config.bind_addr)
         .await
         .map_err(|error| ApiError::Internal(error.to_string()))?;
+    let mut stderr = std::io::stderr();
+    let _ = writeln!(stderr, "memod listening on {}", config.bind_addr);
 
-    serve(listener, router, pending()).await
+    serve(listener, router, shutdown_signal()).await?;
+    state.token_repository.pool().close().await;
+    Ok(())
 }
 
 async fn serve(
@@ -194,9 +364,164 @@ async fn serve(
         .map_err(|error| ApiError::Internal(error.to_string()))
 }
 
+fn init_logging(config: &AppConfig) -> Result<(), ApiError> {
+    if let Some(parent) = config.log_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| ApiError::Internal(error.to_string()))?;
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&config.log_path)
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    let _ = writeln!(
+        file,
+        "{{\"level\":\"{}\",\"message\":\"memod startup\",\"ts\":\"{}\"}}",
+        config.log_level,
+        time::OffsetDateTime::now_utc()
+    );
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let Ok(mut sigterm) = signal(SignalKind::terminate()) else {
+            let _ = tokio::signal::ctrl_c().await;
+            return;
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[derive(Debug)]
+struct PidFileGuard {
+    path: PathBuf,
+}
+
+impl PidFileGuard {
+    fn create(path: &StdPath) -> Result<Self, std::io::Error> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, format!("{}\n", std::process::id()))?;
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+impl Drop for PidFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn default_config_path() -> PathBuf {
+    xdg_config_home().join("memo/config.toml")
+}
+
+fn default_pid_file_path() -> PathBuf {
+    let runtime_dir =
+        std::env::var("XDG_RUNTIME_DIR").map_or_else(|_| std::env::temp_dir(), PathBuf::from);
+    runtime_dir.join("memo/memod.pid")
+}
+
+fn default_bootstrap_token_path() -> PathBuf {
+    xdg_config_home().join("memo/bootstrap.token")
+}
+
+fn xdg_config_home() -> PathBuf {
+    std::env::var("XDG_CONFIG_HOME").map_or_else(|_| home_dir().join(".config"), PathBuf::from)
+}
+
+fn xdg_data_home() -> PathBuf {
+    std::env::var("XDG_DATA_HOME").map_or_else(|_| home_dir().join(".local/share"), PathBuf::from)
+}
+
+fn xdg_state_home() -> PathBuf {
+    std::env::var("XDG_STATE_HOME").map_or_else(|_| home_dir().join(".local/state"), PathBuf::from)
+}
+
+fn home_dir() -> PathBuf {
+    std::env::var("HOME").map_or_else(|_| PathBuf::from("."), PathBuf::from)
+}
+
+fn ensure_xdg_dirs() -> Result<(), std::io::Error> {
+    std::fs::create_dir_all(xdg_config_home().join("memo"))?;
+    std::fs::create_dir_all(xdg_data_home().join("memo"))?;
+    std::fs::create_dir_all(xdg_state_home().join("memo"))?;
+    Ok(())
+}
+
+fn parse_memod_config(body: &str) -> MemodFileConfig {
+    let mut cfg = MemodFileConfig::default();
+    let mut daemon = DaemonConfig::default();
+    let mut write = DaemonWriteConfig::default();
+    let mut limits = DaemonLimits::default();
+    let mut section = String::new();
+
+    for raw in body.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if line.starts_with('[') && line.ends_with(']') {
+            line[1..line.len() - 1].trim().clone_into(&mut section);
+            continue;
+        }
+
+        let Some((key, value_raw)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value_raw.trim().trim_matches('"').to_owned();
+
+        match (section.as_str(), key) {
+            ("", "db_path") => cfg.db_path = Some(PathBuf::from(value)),
+            ("", "log_path") => cfg.log_path = Some(PathBuf::from(value)),
+            ("daemon", "bind_addr") => daemon.bind_addr = Some(value),
+            ("daemon", "log_level") => daemon.log_level = Some(value),
+            ("daemon.write", "fsync") => {
+                if let Ok(parsed) = value.parse::<bool>() {
+                    write.fsync = Some(parsed);
+                }
+            }
+            ("daemon.write", "dir_sync") => {
+                if let Ok(parsed) = value.parse::<bool>() {
+                    write.dir_sync = Some(parsed);
+                }
+            }
+            ("daemon.limits", "max_audit_log_rows") => {
+                if let Ok(parsed) = value.parse::<usize>() {
+                    limits.max_audit_log_rows = Some(parsed);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    daemon.write = Some(write);
+    daemon.limits = Some(limits);
+    cfg.daemon = Some(daemon);
+    cfg
+}
+
 fn app_router(state: &AppState) -> Router {
     let auth_state = AuthState {
         token_repository: Arc::clone(&state.token_repository),
+        audit_service: Arc::clone(&state.audit_service),
     };
 
     let token_routes = Router::new()
@@ -214,6 +539,7 @@ fn app_router(state: &AppState) -> Router {
         .layer(middleware::from_fn_with_state(
             AuthState {
                 token_repository: Arc::clone(&state.token_repository),
+                audit_service: Arc::clone(&state.audit_service),
             },
             auth_middleware,
         ))
@@ -234,6 +560,18 @@ fn app_router(state: &AppState) -> Router {
         .layer(middleware::from_fn_with_state(
             AuthState {
                 token_repository: Arc::clone(&state.token_repository),
+                audit_service: Arc::clone(&state.audit_service),
+            },
+            auth_middleware,
+        ))
+        .with_state(state.clone());
+
+    let audit_routes = Router::new()
+        .route("/v1/meta/audit", get(query_audit))
+        .layer(middleware::from_fn_with_state(
+            AuthState {
+                token_repository: Arc::clone(&state.token_repository),
+                audit_service: Arc::clone(&state.audit_service),
             },
             auth_middleware,
         ))
@@ -243,6 +581,7 @@ fn app_router(state: &AppState) -> Router {
         .route("/health", get(health))
         .merge(token_routes)
         .merge(mount_routes)
+        .merge(audit_routes)
         .merge(fs_routes)
 }
 
@@ -253,15 +592,89 @@ async fn health() -> Json<serde_json::Value> {
     }))
 }
 
+async fn query_audit(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Query(query): Query<AuditQuery>,
+) -> Result<Json<AuditResponse>, HttpError> {
+    if !require_audit_read_scope(&token) {
+        return Err(deny_scope(&state, Some(token.id), None, "audit_query").await);
+    }
+
+    let entries = state
+        .audit_service
+        .query(&query)
+        .await
+        .map_err(|error| HttpError(ApiError::Internal(error.to_string())))?;
+    Ok(Json(AuditResponse { entries }))
+}
+
+fn require_audit_read_scope(token: &memo_core::Token) -> bool {
+    token.has_scope(&Scope::Meta(MetaScope::Read))
+        || token.has_scope(&Scope::Admin(memo_core::AdminScope::All))
+}
+
+async fn deny_scope(
+    state: &AppState,
+    token_id: Option<TokenId>,
+    mount: Option<memo_core::MountName>,
+    operation: &str,
+) -> HttpError {
+    let _ = state
+        .audit_service
+        .append_record(AuditRecord::error(
+            operation,
+            token_id,
+            mount.clone(),
+            None,
+            "missing_scope",
+        ))
+        .await;
+    let _ = state
+        .audit_service
+        .append_domain_event(DomainEvent::AccessDenied {
+            token_id,
+            reason: DenialReason::MissingScope,
+            mount,
+        })
+        .await;
+    HttpError(ApiError::PermissionDenied)
+}
+
+async fn record_domain_event(state: &AppState, event: DomainEvent) {
+    if let Err(error) = state.audit_service.append_domain_event(event).await {
+        let mut stderr = std::io::stderr();
+        let _ = writeln!(stderr, "failed to persist domain event: {error}");
+    }
+}
+
+async fn record_operation_ok(
+    state: &AppState,
+    operation: &str,
+    token_id: Option<TokenId>,
+    mount: Option<memo_core::MountName>,
+    path: Option<String>,
+) {
+    if let Err(error) = state
+        .audit_service
+        .append_record(AuditRecord::ok(operation, token_id, mount, path))
+        .await
+    {
+        let mut stderr = std::io::stderr();
+        let _ = writeln!(stderr, "failed to persist audit operation: {error}");
+    }
+}
+
 async fn list_tokens(
     State(state): State<AppState>,
     Extension(VerifiedToken(token)): Extension<VerifiedToken>,
 ) -> Result<Json<auth::TokenListResponse>, HttpError> {
     if !auth::require_token_list_scope(&token) {
-        return Err(HttpError(ApiError::PermissionDenied));
+        return Err(deny_scope(&state, Some(token.id), None, "token_list").await);
     }
 
     let tokens = state.token_repository.list().await?;
+    record_operation_ok(&state, "token_list", Some(token.id), None, None).await;
     Ok(Json(auth::TokenListResponse { tokens }))
 }
 
@@ -271,10 +684,18 @@ async fn create_token(
     Json(payload): Json<auth::CreateTokenRequest>,
 ) -> Result<Json<auth::CreatedTokenResponse>, HttpError> {
     if !auth::require_token_admin_scope(&token) {
-        return Err(HttpError(ApiError::PermissionDenied));
+        return Err(deny_scope(&state, Some(token.id), None, "token_create").await);
     }
 
     let created = auth::create_token(&state.token_repository, payload).await?;
+    record_domain_event(
+        &state,
+        DomainEvent::TokenCreated {
+            id: created.id,
+            name: created.name.clone(),
+        },
+    )
+    .await;
     Ok(Json(created))
 }
 
@@ -284,7 +705,7 @@ async fn revoke_token(
     Path(id): Path<String>,
 ) -> Result<Json<auth::RevokeTokenResponse>, HttpError> {
     if !auth::require_token_admin_scope(&token) {
-        return Err(HttpError(ApiError::PermissionDenied));
+        return Err(deny_scope(&state, Some(token.id), None, "token_revoke").await);
     }
 
     let parsed = Uuid::from_str(&id)
@@ -292,6 +713,7 @@ async fn revoke_token(
     let token_id = TokenId::from_uuid(parsed);
 
     state.token_repository.delete(&token_id).await?;
+    record_domain_event(&state, DomainEvent::TokenRevoked { id: token_id }).await;
 
     Ok(Json(auth::RevokeTokenResponse {
         id: token_id,
@@ -299,23 +721,16 @@ async fn revoke_token(
     }))
 }
 
-fn default_bootstrap_token_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_owned());
-    PathBuf::from(home)
-        .join(".config")
-        .join("memo")
-        .join("bootstrap.token")
-}
-
 async fn list_mounts(
     State(state): State<AppState>,
     Extension(VerifiedToken(token)): Extension<VerifiedToken>,
 ) -> Result<Json<mount_registry::MountListResponse>, HttpError> {
     if !mount_registry::require_mount_read_scope(&token) {
-        return Err(HttpError(ApiError::PermissionDenied));
+        return Err(deny_scope(&state, Some(token.id), None, "mount_list").await);
     }
 
     let mounts = state.mount_repository.list().await?;
+    record_operation_ok(&state, "mount_list", Some(token.id), None, None).await;
     Ok(Json(mount_registry::MountListResponse { mounts }))
 }
 
@@ -325,7 +740,7 @@ async fn create_mount(
     Json(payload): Json<mount_registry::CreateMountRequest>,
 ) -> Result<Json<memo_core::Mount>, HttpError> {
     if !mount_registry::require_mount_admin_scope(&token) {
-        return Err(HttpError(ApiError::PermissionDenied));
+        return Err(deny_scope(&state, Some(token.id), None, "mount_create").await);
     }
 
     let created = mount_registry::create_mount(&state.mount_repository, payload)
@@ -334,6 +749,14 @@ async fn create_mount(
             DbError::Conflict => HttpError(ApiError::Conflict("mount already exists".to_owned())),
             other => HttpError(other.into()),
         })?;
+    record_domain_event(
+        &state,
+        DomainEvent::MountRegistered {
+            name: created.name.clone(),
+            mode: created.mode.clone(),
+        },
+    )
+    .await;
 
     Ok(Json(created))
 }
@@ -344,7 +767,7 @@ async fn get_mount(
     Path(name): Path<String>,
 ) -> Result<Json<memo_core::Mount>, HttpError> {
     if !mount_registry::require_mount_read_scope(&token) {
-        return Err(HttpError(ApiError::PermissionDenied));
+        return Err(deny_scope(&state, Some(token.id), None, "mount_show").await);
     }
 
     let mount_name = mount_registry::parse_mount_name(&name).map_err(HttpError)?;
@@ -363,13 +786,20 @@ async fn update_mount(
     Json(payload): Json<mount_registry::UpdateMountRequest>,
 ) -> Result<Json<memo_core::Mount>, HttpError> {
     if !mount_registry::require_mount_admin_scope(&token) {
-        return Err(HttpError(ApiError::PermissionDenied));
+        return Err(deny_scope(&state, Some(token.id), None, "mount_update").await);
     }
 
     let mount_name = mount_registry::parse_mount_name(&name).map_err(HttpError)?;
     let updated = mount_registry::update_mount(&state.mount_repository, &mount_name, payload)
         .await
         .map_err(|error| map_mount_not_found(&mount_name, error))?;
+    record_domain_event(
+        &state,
+        DomainEvent::MountUpdated {
+            name: updated.name.clone(),
+        },
+    )
+    .await;
 
     Ok(Json(updated))
 }
@@ -380,7 +810,7 @@ async fn remove_mount(
     Path(name): Path<String>,
 ) -> Result<Json<mount_registry::RemoveMountResponse>, HttpError> {
     if !mount_registry::require_mount_admin_scope(&token) {
-        return Err(HttpError(ApiError::PermissionDenied));
+        return Err(deny_scope(&state, Some(token.id), None, "mount_remove").await);
     }
 
     let mount_name = mount_registry::parse_mount_name(&name).map_err(HttpError)?;
@@ -389,6 +819,13 @@ async fn remove_mount(
         .delete(&mount_name)
         .await
         .map_err(|error| map_mount_not_found(&mount_name, error))?;
+    record_domain_event(
+        &state,
+        DomainEvent::MountRemoved {
+            name: mount_name.clone(),
+        },
+    )
+    .await;
 
     Ok(Json(mount_registry::RemoveMountResponse {
         name: mount_name,
@@ -467,15 +904,30 @@ async fn fs_ls(
     Query(query): Query<FsLsQuery>,
 ) -> Result<Json<fs::ops::LsResponse>, HttpError> {
     if !fs::ops::require_fs_read_scope(&token, query.path.mount()) {
-        return Err(HttpError(ApiError::PermissionDenied));
+        return Err(deny_scope(
+            &state,
+            Some(token.id),
+            Some(query.path.mount().clone()),
+            "fs_ls",
+        )
+        .await);
     }
 
-    state
+    let response = state
         .file_system_service
         .ls(&query.path, query.info.unwrap_or(false))
         .await
-        .map(Json)
-        .map_err(HttpError)
+        .map_err(HttpError)?;
+    record_domain_event(
+        &state,
+        DomainEvent::DirListed {
+            token_id: token.id,
+            mount: query.path.mount().clone(),
+            path: query.path.relative().clone(),
+        },
+    )
+    .await;
+    Ok(Json(response))
 }
 
 async fn fs_tree(
@@ -484,7 +936,13 @@ async fn fs_tree(
     Query(query): Query<FsTreeQuery>,
 ) -> Result<Json<fs::ops::TreeResponse>, HttpError> {
     if !fs::ops::require_fs_read_scope(&token, query.path.mount()) {
-        return Err(HttpError(ApiError::PermissionDenied));
+        return Err(deny_scope(
+            &state,
+            Some(token.id),
+            Some(query.path.mount().clone()),
+            "fs_tree",
+        )
+        .await);
     }
 
     state
@@ -501,7 +959,13 @@ async fn fs_stat(
     Query(query): Query<FsPathQuery>,
 ) -> Result<Json<fs::ops::StatResponse>, HttpError> {
     if !fs::ops::require_fs_read_scope(&token, query.path.mount()) {
-        return Err(HttpError(ApiError::PermissionDenied));
+        return Err(deny_scope(
+            &state,
+            Some(token.id),
+            Some(query.path.mount().clone()),
+            "fs_stat",
+        )
+        .await);
     }
 
     state
@@ -518,7 +982,13 @@ async fn fs_read(
     Query(query): Query<FsPathQuery>,
 ) -> Result<Response, HttpError> {
     if !fs::ops::require_fs_read_scope(&token, query.path.mount()) {
-        return Err(HttpError(ApiError::PermissionDenied));
+        return Err(deny_scope(
+            &state,
+            Some(token.id),
+            Some(query.path.mount().clone()),
+            "fs_read",
+        )
+        .await);
     }
 
     let (resolved, size, mime) = state
@@ -545,6 +1015,16 @@ async fn fs_read(
     response
         .headers_mut()
         .insert(axum::http::header::CONTENT_TYPE, content_type);
+    record_domain_event(
+        &state,
+        DomainEvent::FileRead {
+            token_id: token.id,
+            mount: query.path.mount().clone(),
+            path: query.path.relative().clone(),
+            bytes: size,
+        },
+    )
+    .await;
     Ok(response)
 }
 
@@ -555,19 +1035,35 @@ async fn fs_write(
     body: Body,
 ) -> Result<Json<fs::ops::WriteResponse>, HttpError> {
     if !fs::ops::require_fs_write_scope(&token, query.path.mount()) {
-        return Err(HttpError(ApiError::PermissionDenied));
+        return Err(deny_scope(
+            &state,
+            Some(token.id),
+            Some(query.path.mount().clone()),
+            "fs_write",
+        )
+        .await);
     }
 
     let bytes = axum::body::to_bytes(body, usize::MAX)
         .await
         .map_err(|error| HttpError(ApiError::Internal(error.to_string())))?;
 
-    state
+    let response = state
         .file_system_service
         .write_file(&query.path, &bytes)
         .await
-        .map(Json)
-        .map_err(HttpError)
+        .map_err(HttpError)?;
+    record_domain_event(
+        &state,
+        DomainEvent::FileWritten {
+            token_id: token.id,
+            mount: query.path.mount().clone(),
+            path: query.path.relative().clone(),
+            bytes: response.written_bytes,
+        },
+    )
+    .await;
+    Ok(Json(response))
 }
 
 async fn fs_mkdir(
@@ -576,7 +1072,13 @@ async fn fs_mkdir(
     Query(query): Query<FsPathQuery>,
 ) -> Result<Json<fs::ops::MkdirResponse>, HttpError> {
     if !fs::ops::require_fs_write_scope(&token, query.path.mount()) {
-        return Err(HttpError(ApiError::PermissionDenied));
+        return Err(deny_scope(
+            &state,
+            Some(token.id),
+            Some(query.path.mount().clone()),
+            "fs_mkdir",
+        )
+        .await);
     }
 
     state
@@ -595,7 +1097,13 @@ async fn fs_mv(
     if !fs::ops::require_fs_write_scope(&token, query.src.mount())
         || !fs::ops::require_fs_write_scope(&token, query.dst.mount())
     {
-        return Err(HttpError(ApiError::PermissionDenied));
+        return Err(deny_scope(
+            &state,
+            Some(token.id),
+            Some(query.src.mount().clone()),
+            "fs_mv",
+        )
+        .await);
     }
 
     state
@@ -612,7 +1120,13 @@ async fn fs_rm(
     Query(query): Query<FsRmQuery>,
 ) -> Result<Json<fs::ops::RemoveResponse>, HttpError> {
     if !fs::ops::require_fs_write_scope(&token, query.path.mount()) {
-        return Err(HttpError(ApiError::PermissionDenied));
+        return Err(deny_scope(
+            &state,
+            Some(token.id),
+            Some(query.path.mount().clone()),
+            "fs_rm",
+        )
+        .await);
     }
 
     state
@@ -631,7 +1145,13 @@ async fn fs_cp(
     if !fs::ops::require_fs_read_scope(&token, query.src.mount())
         || !fs::ops::require_fs_write_scope(&token, query.dst.mount())
     {
-        return Err(HttpError(ApiError::PermissionDenied));
+        return Err(deny_scope(
+            &state,
+            Some(token.id),
+            Some(query.src.mount().clone()),
+            "fs_cp",
+        )
+        .await);
     }
 
     state
@@ -648,7 +1168,13 @@ async fn fs_grep(
     Query(query): Query<FsGrepQuery>,
 ) -> Result<Json<fs::ops::GrepResponse>, HttpError> {
     if !fs::ops::require_fs_read_scope(&token, query.path.mount()) {
-        return Err(HttpError(ApiError::PermissionDenied));
+        return Err(deny_scope(
+            &state,
+            Some(token.id),
+            Some(query.path.mount().clone()),
+            "fs_grep",
+        )
+        .await);
     }
 
     state
@@ -671,7 +1197,13 @@ async fn fs_find(
     Query(query): Query<FsFindQuery>,
 ) -> Result<Json<fs::ops::FindResponse>, HttpError> {
     if !fs::ops::require_fs_read_scope(&token, query.path.mount()) {
-        return Err(HttpError(ApiError::PermissionDenied));
+        return Err(deny_scope(
+            &state,
+            Some(token.id),
+            Some(query.path.mount().clone()),
+            "fs_find",
+        )
+        .await);
     }
 
     state
@@ -685,16 +1217,27 @@ async fn fs_find(
 #[cfg(test)]
 mod tests {
     use std::error::Error;
+    use std::io::ErrorKind;
     use std::io::Write;
+    use std::path::PathBuf;
 
     use memo_client::{CreateMountRequest, MemoClient, MemoClientConfig, MemoClientError};
     use memo_core::{ApiError, Audience, MountMode, MountName, MountPath};
     use tempfile::tempdir;
 
     use super::app_router;
+    use crate::audit::AuditService;
     use crate::auth::repository::SqliteTokenRepository;
     use crate::db::{init_pool, DbConfig};
     use crate::mount_registry::repository::{PolicyCache, SqliteMountRepository};
+
+    async fn bind_loopback_listener() -> Result<Option<tokio::net::TcpListener>, Box<dyn Error>> {
+        match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => Ok(Some(listener)),
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => Ok(None),
+            Err(error) => Err(Box::new(error)),
+        }
+    }
 
     #[tokio::test]
     async fn bootstrap_flow() -> Result<(), Box<dyn Error>> {
@@ -703,19 +1246,25 @@ mod tests {
         let db_url = format!("sqlite://{}", db_path.display());
         let bootstrap_path = tempdir.path().join("bootstrap.token");
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let Some(listener) = bind_loopback_listener().await? else {
+            return Ok(());
+        };
         let addr = listener.local_addr()?;
 
         let pool = init_pool(&DbConfig::new(db_url.clone())).await?;
         let token_repository = std::sync::Arc::new(SqliteTokenRepository::new(pool.clone()));
         let mount_repository =
             std::sync::Arc::new(SqliteMountRepository::new(pool, PolicyCache::new()));
+        let audit_service =
+            std::sync::Arc::new(AuditService::new(tempdir.path().join("audit.log"))?);
         let state = super::AppState {
             file_system_service: std::sync::Arc::new(crate::fs::ops::FileSystemService::new(
                 std::sync::Arc::clone(&mount_repository),
+                crate::fs::atomic::AtomicWriteOptions::default(),
             )),
             token_repository,
             mount_repository,
+            audit_service,
         };
 
         if crate::auth::bootstrap_admin_token_if_needed(&state.token_repository, &bootstrap_path)
@@ -768,19 +1317,25 @@ mod tests {
         std::fs::create_dir_all(&mount_root)?;
         std::fs::create_dir_all(&archive_root)?;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let Some(listener) = bind_loopback_listener().await? else {
+            return Ok(());
+        };
         let addr = listener.local_addr()?;
 
         let pool = init_pool(&DbConfig::new(db_url.clone())).await?;
         let token_repository = std::sync::Arc::new(SqliteTokenRepository::new(pool.clone()));
         let mount_repository =
             std::sync::Arc::new(SqliteMountRepository::new(pool, PolicyCache::new()));
+        let audit_service =
+            std::sync::Arc::new(AuditService::new(tempdir.path().join("audit.log"))?);
         let state = super::AppState {
             file_system_service: std::sync::Arc::new(crate::fs::ops::FileSystemService::new(
                 std::sync::Arc::clone(&mount_repository),
+                crate::fs::atomic::AtomicWriteOptions::default(),
             )),
             token_repository,
             mount_repository,
+            audit_service,
         };
 
         if crate::auth::bootstrap_admin_token_if_needed(&state.token_repository, &bootstrap_path)
@@ -915,5 +1470,97 @@ mod tests {
         handle.await??;
 
         Ok(())
+    }
+
+    #[test]
+    fn parse_memod_config_reads_nested_sections() {
+        let config = super::parse_memod_config(
+            r#"
+db_path = "/tmp/memo.db"
+log_path = "/tmp/memod.log"
+
+[daemon]
+bind_addr = "127.0.0.1:19191"
+log_level = "debug"
+
+[daemon.write]
+fsync = false
+dir_sync = true
+
+[daemon.limits]
+max_audit_log_rows = 1234
+"#,
+        );
+
+        assert_eq!(config.db_path, Some(PathBuf::from("/tmp/memo.db")));
+        assert_eq!(config.log_path, Some(PathBuf::from("/tmp/memod.log")));
+
+        let daemon = config
+            .daemon
+            .unwrap_or_else(|| panic!("daemon section should parse"));
+        assert_eq!(daemon.bind_addr.as_deref(), Some("127.0.0.1:19191"));
+        assert_eq!(daemon.log_level.as_deref(), Some("debug"));
+
+        let write = daemon
+            .write
+            .unwrap_or_else(|| panic!("daemon.write should parse"));
+        assert_eq!(write.fsync, Some(false));
+        assert_eq!(write.dir_sync, Some(true));
+
+        let limits = daemon
+            .limits
+            .unwrap_or_else(|| panic!("daemon.limits should parse"));
+        assert_eq!(limits.max_audit_log_rows, Some(1234));
+    }
+
+    #[test]
+    fn parse_memod_config_ignores_invalid_values() {
+        let config = super::parse_memod_config(
+            r#"
+[daemon.write]
+fsync = "definitely-not-bool"
+dir_sync = "also-not-bool"
+
+[daemon.limits]
+max_audit_log_rows = "invalid"
+"#,
+        );
+
+        let daemon = config
+            .daemon
+            .unwrap_or_else(|| panic!("daemon section should always exist"));
+        let write = daemon
+            .write
+            .unwrap_or_else(|| panic!("write section should always exist"));
+        assert_eq!(write.fsync, None);
+        assert_eq!(write.dir_sync, None);
+        let limits = daemon
+            .limits
+            .unwrap_or_else(|| panic!("limits section should always exist"));
+        assert_eq!(limits.max_audit_log_rows, None);
+    }
+
+    #[test]
+    fn app_config_validate_rejects_zero_audit_limit() {
+        let config = super::AppConfig {
+            bind_addr: "127.0.0.1:18301".to_owned(),
+            database_url: "sqlite:///tmp/memo.db".to_owned(),
+            log_level: "info".to_owned(),
+            log_path: PathBuf::from("/tmp/memod.log"),
+            write_fsync: true,
+            write_dir_sync: true,
+            pid_file_path: PathBuf::from("/tmp/memod.pid"),
+            audit_log_path: PathBuf::from("/tmp/audit.log"),
+            max_audit_log_rows: 0,
+            bootstrap_token_path: PathBuf::from("/tmp/bootstrap.token"),
+        };
+
+        let error = config
+            .validate()
+            .err()
+            .unwrap_or_else(|| panic!("zero limit should fail validation"));
+        assert!(error
+            .to_string()
+            .contains("max_audit_log_rows must be greater than zero"));
     }
 }

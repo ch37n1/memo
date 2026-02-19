@@ -20,14 +20,17 @@ Each item is a complete feature that requires its own implementation plan.
 - Phase 2: **DONE**
 - Phase 3: **DONE**
 - Phase 4: **DONE**
+- Phase 5: **DONE**
 - Stream B: **B1 DONE** (`memo-client`)
 - Stream B: **B2 DONE** (`memo` CLI scaffolding + daemon commands)
 - Stream B: **B3 DONE** (`memo` CLI admin commands)
 - Stream B: **B4 DONE** (`memo` CLI filesystem commands)
+- Stream B: **B5 DONE** (`Integration & Security Tests`)
 - Stream A: **A1 DONE** (`memod` database layer)
 - Stream A: **A2 DONE** (`Access Control BC`)
 - Stream A: **A3 DONE** (`Mount Registry BC`)
 - Stream A: **A4 DONE** (`File System BC`)
+- Stream A: **A5 DONE** (`Audit BC + Daemon Lifecycle`)
 
 ---
 
@@ -321,7 +324,7 @@ graph TD
 
 > A finishes the daemon (audit + lifecycle). B builds end-to-end test suites. **Sync point:** B5 requires A1–A4 to be complete (the daemon must have all endpoints). A is already on A5 by this phase, so the dependency is naturally satisfied.
 
-### A5: Audit BC + Daemon Lifecycle
+### A5: Audit BC + Daemon Lifecycle -- **DONE**
 
 **Scope:** Domain event consumption, audit log persistence, audit query API, and everything that makes `memod` a proper production daemon.
 
@@ -349,7 +352,7 @@ graph TD
 
 ---
 
-### B5: Integration & Security Tests
+### B5: Integration & Security Tests -- **DONE**
 
 **Scope:** Full end-to-end test infrastructure and comprehensive test suites.
 

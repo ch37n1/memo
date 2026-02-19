@@ -200,9 +200,11 @@ fn expand_user_path(path: &str) -> Result<PathBuf, CliError> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
-    use super::{resolve_daemon_addr, resolve_token};
+    use super::{
+        expand_user_path, parse_bind_addr, resolve_daemon_addr, resolve_log_path, resolve_token,
+    };
 
     #[test]
     fn daemon_addr_uses_priority_chain() {
@@ -253,5 +255,72 @@ mod tests {
         let token = resolve_token(None, None, Path::new("/does/not/exist"))
             .unwrap_or_else(|error| panic!("token should resolve: {error}"));
         assert!(token.is_none());
+    }
+
+    #[test]
+    fn parse_bind_addr_handles_valid_and_invalid_values() {
+        let parsed = parse_bind_addr(Some("10.0.0.7:19300"))
+            .unwrap_or_else(|error| panic!("bind addr should parse: {error}"));
+        assert_eq!(parsed.0.as_deref(), Some("10.0.0.7"));
+        assert_eq!(parsed.1, Some(19_300));
+
+        let none = parse_bind_addr(Some("   "))
+            .unwrap_or_else(|error| panic!("empty bind addr should be ignored: {error}"));
+        assert_eq!(none, (None, None));
+
+        let invalid_format = parse_bind_addr(Some("invalid"))
+            .err()
+            .unwrap_or_else(|| panic!("invalid bind addr should fail"));
+        assert!(invalid_format
+            .to_string()
+            .contains("invalid daemon.bind_addr"));
+
+        let invalid_port = parse_bind_addr(Some("127.0.0.1:not-a-port"))
+            .err()
+            .unwrap_or_else(|| panic!("invalid bind port should fail"));
+        assert!(invalid_port
+            .to_string()
+            .contains("invalid daemon.bind_addr port"));
+    }
+
+    #[test]
+    fn resolve_daemon_addr_rejects_invalid_env_port() {
+        let error = resolve_daemon_addr(None, None, None, Some("bad-port"), None)
+            .err()
+            .unwrap_or_else(|| panic!("invalid MEMO_PORT should fail"));
+        assert!(error.to_string().contains("invalid MEMO_PORT"));
+    }
+
+    #[test]
+    fn resolve_token_reads_file_and_ignores_empty_token_file() {
+        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("temp dir: {error}"));
+        let token_file = dir.path().join("default.token");
+        std::fs::write(&token_file, " token-from-file \n")
+            .unwrap_or_else(|error| panic!("token file should write: {error}"));
+
+        let token = resolve_token(None, None, &token_file)
+            .unwrap_or_else(|error| panic!("token should load from file: {error}"));
+        assert_eq!(token.as_deref(), Some("token-from-file"));
+
+        std::fs::write(&token_file, "  \n")
+            .unwrap_or_else(|error| panic!("token file should write: {error}"));
+        let token = resolve_token(None, None, &token_file)
+            .unwrap_or_else(|error| panic!("empty token file should resolve: {error}"));
+        assert!(token.is_none());
+    }
+
+    #[test]
+    fn resolve_log_path_uses_custom_and_default_values() {
+        let custom = resolve_log_path(Some("/tmp/memo-test.log"))
+            .unwrap_or_else(|error| panic!("custom log path should resolve: {error}"));
+        assert_eq!(custom, PathBuf::from("/tmp/memo-test.log"));
+
+        let expanded = expand_user_path("~/memo.log")
+            .unwrap_or_else(|error| panic!("tilde path should expand: {error}"));
+        assert!(expanded.ends_with("memo.log"));
+
+        let default_path = resolve_log_path(Some("   "))
+            .unwrap_or_else(|error| panic!("default log path should resolve: {error}"));
+        assert!(default_path.ends_with(".local/state/memo/memod.log"));
     }
 }
