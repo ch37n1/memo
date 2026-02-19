@@ -12,6 +12,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+base64.workspace = true
 clap.workspace = true
 memo-client = { path = "../memo-client" }
 memo-core = { path = "../memo-core" }

@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod daemon;
 mod error;
+mod fs;
 
 use clap::Parser;
 use std::io::Write;
@@ -34,6 +35,17 @@ async fn run() -> Result<(), CliError> {
         Commands::Mount(command) => admin::run_mount(command, &runtime).await,
         Commands::Token(command) => admin::run_token(command, &runtime).await,
         Commands::Audit(args) => admin::run_audit(args, &runtime).await,
+        Commands::Ls(args) => fs::run_ls(args, &runtime).await,
+        Commands::Tree(args) => fs::run_tree(args, &runtime).await,
+        Commands::Cat(args) => fs::run_cat(args, &runtime).await,
+        Commands::Write(args) => fs::run_write(args, &runtime).await,
+        Commands::Mkdir(args) => fs::run_mkdir(args, &runtime).await,
+        Commands::Mv(args) => fs::run_mv(args, &runtime).await,
+        Commands::Rm(args) => fs::run_rm(args, &runtime).await,
+        Commands::Cp(args) => fs::run_cp(args, &runtime).await,
+        Commands::Grep(args) => fs::run_grep(args, &runtime).await,
+        Commands::Find(args) => fs::run_find(args, &runtime).await,
+        Commands::Info(args) => fs::run_info(args, &runtime).await,
     }
 }
 
@@ -181,5 +193,36 @@ mod tests {
         assert_eq!(args.mount.as_deref(), Some("VaultKB"));
         assert_eq!(args.result.as_deref(), Some("ok"));
         assert_eq!(args.limit, Some(25));
+    }
+
+    #[test]
+    fn parses_fs_ls_with_mount_default() {
+        let parsed = Cli::try_parse_from(["memo", "--mount", "VaultKB", "ls", "notes", "--info"]);
+        let cli = match parsed {
+            Ok(cli) => cli,
+            Err(error) => panic!("fs ls should parse: {error}"),
+        };
+
+        assert_eq!(cli.mount.as_deref(), Some("VaultKB"));
+        let Commands::Ls(args) = cli.command else {
+            panic!("expected ls command");
+        };
+        assert_eq!(args.path, "notes");
+        assert!(args.info);
+    }
+
+    #[test]
+    fn parses_fs_cp_local_to_mount() {
+        let parsed = Cli::try_parse_from(["memo", "cp", "./local.md", "VaultKB:/notes/local.md"]);
+        let cli = match parsed {
+            Ok(cli) => cli,
+            Err(error) => panic!("fs cp should parse: {error}"),
+        };
+
+        let Commands::Cp(args) = cli.command else {
+            panic!("expected cp command");
+        };
+        assert_eq!(args.src, "./local.md");
+        assert_eq!(args.dst, "VaultKB:/notes/local.md");
     }
 }

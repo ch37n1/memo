@@ -22,6 +22,7 @@ Each item is a complete feature that requires its own implementation plan.
 - Stream B: **B1 DONE** (`memo-client`)
 - Stream B: **B2 DONE** (`memo` CLI scaffolding + daemon commands)
 - Stream B: **B3 DONE** (`memo` CLI admin commands)
+- Stream B: **B4 DONE** (`memo` CLI filesystem commands)
 - Stream A: **A1 DONE** (`memod` database layer)
 - Stream A: **A2 DONE** (`Access Control BC`)
 - Stream A: **A3 DONE** (`Mount Registry BC`)
@@ -82,6 +83,7 @@ graph TD
     style B1 fill:#dcfce7,stroke:#16a34a
     style B2 fill:#dcfce7,stroke:#16a34a
     style B3 fill:#dcfce7,stroke:#16a34a
+    style B4 fill:#dcfce7,stroke:#16a34a
 ```
 
 **Sync point:** Stream B's integration tests (B5) require the daemon to be feature-complete through A4. By the phased structure, A is already on A5 when B reaches B5, so this is naturally satisfied.
@@ -287,7 +289,7 @@ graph TD
 
 ---
 
-### B4: CLI Filesystem Commands
+### B4: CLI Filesystem Commands -- **DONE**
 
 **Scope:** All filesystem-facing CLI commands — the primary user and agent interface.
 

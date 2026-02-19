@@ -37,6 +37,28 @@ pub enum Commands {
     Token(TokenCommand),
     /// Query audit entries.
     Audit(AuditArgs),
+    /// List directory entries.
+    Ls(FsLsArgs),
+    /// Show recursive tree.
+    Tree(FsTreeArgs),
+    /// Read file contents.
+    Cat(FsCatArgs),
+    /// Write file contents from stdin or a local file.
+    Write(FsWriteArgs),
+    /// Create a directory.
+    Mkdir(FsMkdirArgs),
+    /// Move or rename path.
+    Mv(FsMvArgs),
+    /// Remove file or directory.
+    Rm(FsRmArgs),
+    /// Copy mount->mount via daemon or local file -> mount.
+    Cp(FsCpArgs),
+    /// Search file contents by regex pattern.
+    Grep(FsGrepArgs),
+    /// Find files by glob pattern.
+    Find(FsFindArgs),
+    /// Show metadata and memo summary for a path.
+    Info(FsInfoArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -184,4 +206,102 @@ pub struct AuditArgs {
     pub before: Option<String>,
     #[arg(long)]
     pub after: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct FsLsArgs {
+    /// Mount path (`Mount:/path`) or relative path when `--mount` is set.
+    pub path: String,
+    /// Include memo summary data when available.
+    #[arg(long)]
+    pub info: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct FsTreeArgs {
+    /// Mount path (`Mount:/path`) or relative path when `--mount` is set.
+    pub path: String,
+    /// Maximum depth.
+    #[arg(long)]
+    pub depth: Option<u8>,
+}
+
+#[derive(Debug, Args)]
+pub struct FsCatArgs {
+    /// Mount path (`Mount:/path`) or relative path when `--mount` is set.
+    pub path: String,
+}
+
+#[derive(Debug, Args)]
+pub struct FsWriteArgs {
+    /// Mount path (`Mount:/path`) or relative path when `--mount` is set.
+    pub path: String,
+    /// Local file source. When omitted, stdin is used.
+    #[arg(long)]
+    pub file: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct FsMkdirArgs {
+    /// Mount path (`Mount:/path`) or relative path when `--mount` is set.
+    pub path: String,
+}
+
+#[derive(Debug, Args)]
+pub struct FsMvArgs {
+    /// Source mount path (`Mount:/path`) or relative path when `--mount` is set.
+    pub src: String,
+    /// Destination mount path (`Mount:/path`) or relative path when `--mount` is set.
+    pub dst: String,
+}
+
+#[derive(Debug, Args)]
+pub struct FsRmArgs {
+    /// Mount path (`Mount:/path`) or relative path when `--mount` is set.
+    pub path: String,
+    /// Remove directories recursively.
+    #[arg(long)]
+    pub recursive: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct FsCpArgs {
+    /// Source mount path (`Mount:/path`) or local filesystem path.
+    pub src: String,
+    /// Destination mount path (`Mount:/path`) or relative path when `--mount` is set.
+    pub dst: String,
+}
+
+#[derive(Debug, Args)]
+pub struct FsGrepArgs {
+    /// Mount path (`Mount:/path`) or relative path when `--mount` is set.
+    pub path: String,
+    /// Regex pattern.
+    pub pattern: String,
+    /// Disable recursive search.
+    #[arg(long)]
+    pub no_recursive: bool,
+    /// Use case-insensitive matching.
+    #[arg(long)]
+    pub case_insensitive: bool,
+    /// Maximum matches.
+    #[arg(long)]
+    pub max_results: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub struct FsFindArgs {
+    /// Mount path (`Mount:/path`) or relative path when `--mount` is set.
+    pub path: String,
+    /// Glob pattern.
+    pub glob: String,
+    /// Maximum matches.
+    #[arg(long)]
+    pub max_results: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub struct FsInfoArgs {
+    /// Mount path (`Mount:/path`) or relative path when `--mount` is set.
+    pub path: String,
 }
