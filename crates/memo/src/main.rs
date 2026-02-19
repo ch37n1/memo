@@ -4,4 +4,9 @@
 fn main() {}
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    #[test]
+    fn main_executes() {
+        super::main();
+    }
+}

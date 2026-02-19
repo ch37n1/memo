@@ -219,9 +219,11 @@ pub trait TokenRepository: Send + Sync {
     async fn list(&self) -> Result<Vec<TokenView>, DbError>;             // no raw hashes
     async fn save(&self, token: &Token) -> Result<(), DbError>;
     async fn delete(&self, id: &TokenId) -> Result<(), DbError>;
-    async fn touch_last_used(&self, id: &TokenId);                       // best-effort, non-blocking
+    async fn touch_last_used(&self, id: &TokenId) -> Result<(), DbError>;
 }
 ```
+
+`touch_last_used` errors are non-fatal for request success, but they are still returned so callers can log and observe persistence problems.
 
 The `PolicyCache` (`DashMap<MountName, Arc<CompiledMount>>`) is an implementation detail of `SqliteMountRepository` — invisible to the domain.
 
@@ -251,6 +253,21 @@ pub enum DomainEvent {
     TokenCreated    { id: TokenId, name: String },
     TokenRevoked    { id: TokenId },
     AccessDenied { token_id: Option<TokenId>, reason: DenialReason, mount: Option<MountName> },
+}
+```
+
+`DomainEvent` uses an internally tagged serde representation:
+
+- Tag field: `type`
+- Variant naming: `snake_case`
+
+Example serialized event:
+
+```json
+{
+  "type": "mount_registered",
+  "name": "VaultKB",
+  "mode": "read_write"
 }
 ```
 

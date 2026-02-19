@@ -170,6 +170,7 @@ Audit entries are **not** stored in SQLite — the log file is the source of tru
 | **Domain model location** | `memo-core` (shared crate, no I/O) | Aggregates and value objects are shared between daemon and client without importing daemon internals |
 | **Auth storage** | Argon2id hash in SQLite, raw token never persisted | Token is a secret; only the hash is stored; verification is CPU-bound and dispatched off the async thread pool |
 | **Audit log** | Append-only file (JSON lines), not SQLite | Write-once, independently inspectable, no DB lock contention; sequential `id` from in-memory counter enables forward pagination |
+| **Domain event encoding** | Internally tagged serde enum (`type` + snake_case) | Stable, explicit wire shape for audit consumers and future event subscribers |
 | **Atomic writes** | Write to temp file, then `rename` | Rename is atomic on POSIX; compatible with file watchers (Obsidian); temp file cleaned up on any error |
 | **Path validation split** | Value objects (structural) + PolicyEngine (canonical) | Structural checks are pure and testable without I/O; canonical checks (canonicalize, symlinks, globs) require the filesystem |
 | **Module organization** | By bounded context, not technical layer | Keeps domain logic co-located; each BC has one application service coordinating its own repository and domain objects |

@@ -1,5 +1,4 @@
-// memod: daemon process. Owns all filesystem I/O.
-// Serves an axum/tokio HTTP API on 127.0.0.1:18301.
+// memo-ui binary entry stub for Phase 0 scaffolding.
 
 fn main() {}
 

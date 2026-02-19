@@ -4,6 +4,7 @@ members = [
     "crates/memod",
     "crates/memo",
     "crates/memo-client",
+    "crates/memo-ui/src-tauri",
 ]
 resolver = "2"
 
@@ -47,10 +48,13 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 # serialization
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
+time       = { version = "0.3", features = ["serde", "parsing", "formatting"] }
+uuid       = { version = "1", features = ["serde", "v4"] }
 
 # error handling
 thiserror = "2"
 anyhow    = "1"
+async-trait = "0.1"
 
 # CLI
 clap = { version = "4", features = ["derive"] }

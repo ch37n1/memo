@@ -17,6 +17,7 @@
 - [x] Ensure deterministic builds (lockfiles, vendoring policy if relevant)
 - [ ] Establish local config handling: env template, safe defaults, validation
 - [x] Add code coverage calculation and assert to >80%
+- [x] Document coverage toolchain requirements (`cargo-llvm-cov` + `llvm-cov` + `llvm-profdata`)
 
 In future (next month):
 - [ ] Code health

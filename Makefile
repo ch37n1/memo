@@ -1,4 +1,6 @@
-export PATH := $(HOME)/.cargo/bin:$(PATH)
+export PATH := /opt/homebrew/opt/llvm/bin:$(HOME)/.cargo/bin:$(PATH)
+export LLVM_COV ?= $(shell command -v llvm-cov 2>/dev/null || echo /opt/homebrew/opt/llvm/bin/llvm-cov)
+export LLVM_PROFDATA ?= $(shell command -v llvm-profdata 2>/dev/null || echo /opt/homebrew/opt/llvm/bin/llvm-profdata)
 
 .PHONY: build test lint fmt fmt-check coverage check dev setup
 

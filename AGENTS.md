@@ -181,6 +181,7 @@ Every task follows the same core loop: **understand → implement → verify →
 | **Read provided context** | Read all referenced materials: docs, tickets, code, conversations. |
 | **Explore additional context** | Investigate codebase, related modules, dependencies. Form your own understanding. |
 | **Clarify** | If context is still insufficient — ask questions. Do not guess on ambiguous requirements. |
+| **External blockers** | If blocked by external circumstances (network access, missing local tools, credentials, approvals), explicitly ask the user to perform the required action and then continue once confirmed. |
 
 **Verify:**
 

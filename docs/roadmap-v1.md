@@ -76,7 +76,7 @@ graph TD
 
 ---
 
-## Phase 0 — Foundation
+## Phase 0 — Foundation -- **DONE**
 
 > Both workers collaborate. Everything else depends on this.
 

@@ -1,0 +1,18 @@
+[package]
+name = "memo-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "memo_ui"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[[bin]]
+name = "memo-ui"
+path = "src/main.rs"

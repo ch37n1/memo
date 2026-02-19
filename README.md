@@ -14,9 +14,12 @@ A secure, mount-scoped, daemon-backed filesystem layer for collaborative human�
 
 ## Prerequisites
 
-- [Rust](https://rustup.rs) (stable, managed via `rust-toolchain.toml`)
+- Rust toolchain (`cargo` + `rustc`)
 - [pre-commit](https://pre-commit.com) — for local git hooks (`pip install pre-commit` or `brew install pre-commit`)
 - [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) — required for `make check` coverage gate (`cargo install cargo-llvm-cov`)
+- LLVM coverage tools (`llvm-cov`, `llvm-profdata`)
+  - Homebrew setup: `brew install llvm`
+  - Add to PATH (zsh): `echo 'export PATH="/opt/homebrew/opt/llvm/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc`
 
 ---
 
