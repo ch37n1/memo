@@ -19,6 +19,7 @@ Focus: responsibilities, invariants, flows, edge-case behavior, and integration 
 - [Audit](audit.md)
 - [Daemon Lifecycle](daemon-lifecycle.md)
 - [CLI](cli.md)
+- [memo-ui](memo-ui.md)
 
 ## How To Use
 

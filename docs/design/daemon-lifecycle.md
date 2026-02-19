@@ -45,6 +45,17 @@ Lifecycle-relevant config includes:
 
 Config parse/validation errors are startup failures, not deferred runtime warnings.
 
+Config precedence for write durability:
+
+1. Environment overrides (`MEMOD_WRITE_FSYNC`, `MEMOD_WRITE_DIR_SYNC`) when present and parseable.
+2. File config (`daemon.write.fsync`, `daemon.write.dir_sync`).
+3. Built-in defaults (`true` for both).
+
+Operational intent:
+
+- Keep defaults enabled for stronger durability.
+- Disable selectively only for controlled environments (for example specific test harnesses or known filesystem limitations).
+
 ## Runtime Contracts
 
 - `GET /health` stays unauthenticated and reflects daemon liveness.

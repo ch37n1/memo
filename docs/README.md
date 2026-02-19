@@ -135,6 +135,7 @@ _In future, some agreements can be moved to `operations` if grow to much._
 | `docs/operations/task-workflow.md` | Standard task execution workflow | Procedural truth |
 | `docs/operations/parallel-dev.md` | Collaboration guidance for parallel work | Operational truth |
 | `docs/operations/documentation.md` | Documentation conventions and taxonomy | Operational truth |
+| `docs/operations/memo-ui.md` | `memo-ui` local run/build/troubleshooting guide | Operational truth |
 | `docs/operations/manual-regression.md` | Full manual regression test runbook for v1 release validation | Operational truth |
 | `docs/archive/vision.md` | Historical vision snapshot | Historical truth |
 

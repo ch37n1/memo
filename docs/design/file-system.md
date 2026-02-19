@@ -66,3 +66,20 @@ Write behavior uses a write-by-rename approach:
 5. cleanup temp file on error
 
 This prevents partially written target files and is compatible with file watchers.
+
+Hardening notes (Phase 6):
+
+- Sync durability calls treat selected platform/filesystem errors as non-fatal for write completion:
+  - `PermissionDenied`
+  - `Unsupported`
+  - `InvalidInput`
+- This applies to both file sync and directory sync steps.
+- Behavior is intentionally conservative: unknown sync errors still fail the write.
+
+Runtime tuning:
+
+- `daemon.write.fsync` and `daemon.write.dir_sync` remain the primary config toggles.
+- Environment overrides are also supported:
+  - `MEMOD_WRITE_FSYNC`
+  - `MEMOD_WRITE_DIR_SYNC`
+- Integration tests may disable these durability knobs to improve portability in constrained environments while still validating atomic rename semantics.
