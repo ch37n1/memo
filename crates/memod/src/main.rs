@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod db;
+pub mod mount_registry;
 
 use std::future::pending;
 use std::io::Write;
@@ -18,8 +19,10 @@ use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get};
 use axum::{Extension, Json, Router};
+use memo_core::repositories::MountRepository;
 use memo_core::repositories::TokenRepository;
 use memo_core::{ApiError, AuthError, DbError, TokenId};
+use mount_registry::repository::{PolicyCache, SqliteMountRepository};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -50,6 +53,7 @@ impl AppConfig {
 #[derive(Clone)]
 struct AppState {
     token_repository: Arc<SqliteTokenRepository>,
+    mount_repository: Arc<SqliteMountRepository>,
 }
 
 #[derive(Debug, Serialize)]
@@ -144,9 +148,10 @@ async fn main() {
 
 async fn run(config: AppConfig) -> Result<(), ApiError> {
     let pool = db::init_pool(&db::DbConfig::new(config.database_url)).await?;
-    let repository = Arc::new(SqliteTokenRepository::new(pool));
+    let token_repository = Arc::new(SqliteTokenRepository::new(pool.clone()));
+    let mount_repository = Arc::new(SqliteMountRepository::new(pool, PolicyCache::new()));
 
-    if auth::bootstrap_admin_token_if_needed(&repository, &config.bootstrap_token_path)
+    if auth::bootstrap_admin_token_if_needed(&token_repository, &config.bootstrap_token_path)
         .await?
         .is_some()
     {
@@ -159,7 +164,8 @@ async fn run(config: AppConfig) -> Result<(), ApiError> {
     }
 
     let state = AppState {
-        token_repository: repository,
+        token_repository,
+        mount_repository,
     };
 
     let router = app_router(&state);
@@ -192,9 +198,24 @@ fn app_router(state: &AppState) -> Router {
         .layer(middleware::from_fn_with_state(auth_state, auth_middleware))
         .with_state(state.clone());
 
+    let mount_routes = Router::new()
+        .route("/v1/meta/mounts", get(list_mounts).post(create_mount))
+        .route(
+            "/v1/meta/mounts/{name}",
+            get(get_mount).patch(update_mount).delete(remove_mount),
+        )
+        .layer(middleware::from_fn_with_state(
+            AuthState {
+                token_repository: Arc::clone(&state.token_repository),
+            },
+            auth_middleware,
+        ))
+        .with_state(state.clone());
+
     Router::new()
         .route("/health", get(health))
         .merge(token_routes)
+        .merge(mount_routes)
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -258,6 +279,102 @@ fn default_bootstrap_token_path() -> PathBuf {
         .join("bootstrap.token")
 }
 
+async fn list_mounts(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+) -> Result<Json<mount_registry::MountListResponse>, HttpError> {
+    if !mount_registry::require_mount_read_scope(&token) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    let mounts = state.mount_repository.list().await?;
+    Ok(Json(mount_registry::MountListResponse { mounts }))
+}
+
+async fn create_mount(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Json(payload): Json<mount_registry::CreateMountRequest>,
+) -> Result<Json<memo_core::Mount>, HttpError> {
+    if !mount_registry::require_mount_admin_scope(&token) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    let created = mount_registry::create_mount(&state.mount_repository, payload)
+        .await
+        .map_err(|error| match error {
+            DbError::Conflict => HttpError(ApiError::Conflict("mount already exists".to_owned())),
+            other => HttpError(other.into()),
+        })?;
+
+    Ok(Json(created))
+}
+
+async fn get_mount(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Path(name): Path<String>,
+) -> Result<Json<memo_core::Mount>, HttpError> {
+    if !mount_registry::require_mount_read_scope(&token) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    let mount_name = mount_registry::parse_mount_name(&name).map_err(HttpError)?;
+    let mount = state
+        .mount_repository
+        .find(&mount_name)
+        .await
+        .map_err(|error| map_mount_not_found(&mount_name, error))?;
+    Ok(Json(mount))
+}
+
+async fn update_mount(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Path(name): Path<String>,
+    Json(payload): Json<mount_registry::UpdateMountRequest>,
+) -> Result<Json<memo_core::Mount>, HttpError> {
+    if !mount_registry::require_mount_admin_scope(&token) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    let mount_name = mount_registry::parse_mount_name(&name).map_err(HttpError)?;
+    let updated = mount_registry::update_mount(&state.mount_repository, &mount_name, payload)
+        .await
+        .map_err(|error| map_mount_not_found(&mount_name, error))?;
+
+    Ok(Json(updated))
+}
+
+async fn remove_mount(
+    State(state): State<AppState>,
+    Extension(VerifiedToken(token)): Extension<VerifiedToken>,
+    Path(name): Path<String>,
+) -> Result<Json<mount_registry::RemoveMountResponse>, HttpError> {
+    if !mount_registry::require_mount_admin_scope(&token) {
+        return Err(HttpError(ApiError::PermissionDenied));
+    }
+
+    let mount_name = mount_registry::parse_mount_name(&name).map_err(HttpError)?;
+    state
+        .mount_repository
+        .delete(&mount_name)
+        .await
+        .map_err(|error| map_mount_not_found(&mount_name, error))?;
+
+    Ok(Json(mount_registry::RemoveMountResponse {
+        name: mount_name,
+        removed: true,
+    }))
+}
+
+fn map_mount_not_found(name: &memo_core::MountName, error: DbError) -> HttpError {
+    match error {
+        DbError::NotFound => HttpError(ApiError::MountNotFound(name.to_string())),
+        other => HttpError(other.into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error;
@@ -269,6 +386,7 @@ mod tests {
     use super::app_router;
     use crate::auth::repository::SqliteTokenRepository;
     use crate::db::{init_pool, DbConfig};
+    use crate::mount_registry::repository::{PolicyCache, SqliteMountRepository};
 
     #[tokio::test]
     async fn bootstrap_flow() -> Result<(), Box<dyn Error>> {
@@ -281,9 +399,12 @@ mod tests {
         let addr = listener.local_addr()?;
 
         let pool = init_pool(&DbConfig::new(db_url.clone())).await?;
-        let repository = std::sync::Arc::new(SqliteTokenRepository::new(pool));
+        let token_repository = std::sync::Arc::new(SqliteTokenRepository::new(pool.clone()));
+        let mount_repository =
+            std::sync::Arc::new(SqliteMountRepository::new(pool, PolicyCache::new()));
         let state = super::AppState {
-            token_repository: repository,
+            token_repository,
+            mount_repository,
         };
 
         if crate::auth::bootstrap_admin_token_if_needed(&state.token_repository, &bootstrap_path)
