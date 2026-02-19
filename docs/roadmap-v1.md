@@ -107,7 +107,7 @@ graph TD
 
 > Streams diverge. A builds the daemon's persistence layer. B builds the shared HTTP client.
 
-### A1: memod Database Layer
+### A1: memod Database Layer -- **DONE**
 
 **Scope:** SQLite pool, WAL mode, migrations, schema tables — the persistence foundation the daemon builds on.
 
@@ -120,6 +120,8 @@ graph TD
 - Unit tests: migration idempotency, WAL mode verification
 
 **Depends on:** Phase 0
+
+**Status:** Completed in stream `a`.
 
 ---
 

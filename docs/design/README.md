@@ -12,6 +12,7 @@ Focus: responsibilities, invariants, flows, edge-case behavior, and integration 
 
 ## Bounded Context Design
 
+- [Persistence Infrastructure](persistence.md)
 - [Access Control](access-control.md)
 - [Mount Registry](mount-registry.md)
 - [File System](file-system.md)

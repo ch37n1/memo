@@ -28,6 +28,12 @@ All IPC is REST HTTP/1.1 on loopback TCP (`127.0.0.1:18301`). No external networ
 
 MVP — single-user personal tool. One human operator, one or more LLM agents, all on the same machine. No multi-user, no networked access.
 
+### Implementation Status
+
+- Phase 0 (foundation) is complete.
+- Stream A, A1 (`memod` database layer) is complete.
+- Next active daemon milestone is A2 (authentication and access control).
+
 ### Goals (v1)
 
 - Safe, policy-enforced access to named filesystem mounts
