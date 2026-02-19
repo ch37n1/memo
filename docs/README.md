@@ -33,6 +33,7 @@ MVP — single-user personal tool. One human operator, one or more LLM agents, a
 - Phase 0 (foundation) is complete.
 - Phase 1 (core infrastructure) is complete.
 - Phase 2 (authentication) is complete.
+- Phase 3 (mount system) is complete.
 - Stream A, A1 (`memod` database layer) is complete.
 - Stream A, A2 (`Access Control BC`) is complete.
 - Stream A, A3 (`Mount Registry BC`) is complete.

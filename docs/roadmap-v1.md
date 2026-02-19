@@ -18,6 +18,7 @@ Each item is a complete feature that requires its own implementation plan.
 - Phase 0: **DONE**
 - Phase 1: **DONE**
 - Phase 2: **DONE**
+- Phase 3: **DONE**
 - Stream B: **B1 DONE** (`memo-client`)
 - Stream B: **B2 DONE** (`memo` CLI scaffolding + daemon commands)
 - Stream B: **B3 DONE** (`memo` CLI admin commands)
@@ -204,7 +205,7 @@ graph TD
 
 ---
 
-## Phase 3 — Mount System
+## Phase 3 — Mount System -- **DONE**
 
 > A builds mount registration and policy enforcement. B adds admin commands to the CLI.
 
