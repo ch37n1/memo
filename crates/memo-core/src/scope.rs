@@ -39,8 +39,8 @@ impl fmt::Display for Scope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Fs { mount, action } => write!(f, "fs:{mount}:{action}"),
-            Self::Meta(scope) => write!(f, "meta:{scope}"),
-            Self::Admin(scope) => write!(f, "admin:{scope}"),
+            Self::Meta(scope) => write!(f, "meta:*:{scope}"),
+            Self::Admin(scope) => write!(f, "admin:*:{scope}"),
         }
     }
 }
@@ -50,28 +50,31 @@ impl FromStr for Scope {
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = input.split(':').collect();
-        if parts.len() != 3 {
+        if parts.len() != 3 && parts.len() != 2 {
             return Err(ScopeParseError::InvalidFormat);
         }
 
         match parts[0] {
             "fs" => {
+                if parts.len() != 3 {
+                    return Err(ScopeParseError::InvalidFormat);
+                }
                 let mount = ScopeMount::from_str(parts[1])?;
                 let action = FsAction::from_str(parts[2])?;
                 Ok(Self::Fs { mount, action })
             }
             "meta" => {
-                let scope = MetaScope::from_str(parts[2])?;
-                if parts[1] != "*" {
+                if parts.len() == 3 && parts[1] != "*" {
                     return Err(ScopeParseError::InvalidFormat);
                 }
+                let scope = MetaScope::from_str(parts[parts.len() - 1])?;
                 Ok(Self::Meta(scope))
             }
             "admin" => {
-                let scope = AdminScope::from_str(parts[2])?;
-                if parts[1] != "*" {
+                if parts.len() == 3 && parts[1] != "*" {
                     return Err(ScopeParseError::InvalidFormat);
                 }
+                let scope = AdminScope::from_str(parts[parts.len() - 1])?;
                 Ok(Self::Admin(scope))
             }
             _ => Err(ScopeParseError::UnknownNamespace),
@@ -304,5 +307,26 @@ mod tests {
 
         let required = Scope::from_str("fs:VaultKB:read").expect("scope should parse");
         assert!(scopes.contains_required(&required));
+    }
+
+    #[test]
+    fn serializes_meta_and_admin_with_wildcard_segment() {
+        let meta = Scope::from_str("meta:*:read").expect("scope should parse");
+        let admin = Scope::from_str("admin:*:tokens").expect("scope should parse");
+
+        assert_eq!(meta.to_string(), "meta:*:read");
+        assert_eq!(admin.to_string(), "admin:*:tokens");
+    }
+
+    #[test]
+    fn parses_legacy_two_part_meta_and_admin_scopes() {
+        assert_eq!(
+            Scope::from_str("meta:read").expect("meta scope should parse"),
+            Scope::Meta(crate::scope::MetaScope::Read)
+        );
+        assert_eq!(
+            Scope::from_str("admin:tokens").expect("admin scope should parse"),
+            Scope::Admin(crate::scope::AdminScope::Tokens)
+        );
     }
 }
