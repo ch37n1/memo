@@ -12,6 +12,7 @@ It follows a client–server model with three binaries:
 - **`memo`** — CLI client for humans and agents
 - **`memo-ui`** — Tauri v2 native macOS desktop application for managing mounts, tokens, and audit log; not a general file editor
 - **`memo-client`** — shared Rust library crate; typed REST HTTP client (`reqwest`-based), used by both `memo` CLI and `memo-ui` backend
+- **`memo-core`** — shared domain model: aggregates (`Mount`, `Token`), value objects (`MountPath`, `RelativePath`, `Scope`), repository interfaces, domain events, and error types; no I/O
 
 **Primary platform: macOS.** Linux is a supported secondary target. Windows is out of scope.
 
@@ -145,9 +146,119 @@ One human operator. One or more LLM agents. All on the same machine. No multi-us
 
 ---
 
-## 7. Component Design
+## 7. Domain Model
 
-### 7.1 memod (Daemon)
+The system is organized around four bounded contexts. Each context owns its domain concepts and is responsible for enforcing its invariants. Inter-context communication happens through application services and domain events — not through shared mutable state.
+
+### 7.1 Bounded Contexts
+
+| Context | Responsibility | Core Concepts |
+|---------|---------------|---------------|
+| **Access Control** | Token lifecycle, scope resolution, authentication decisions | `Token`, `Scope`, `TokenId`, `BearerToken` |
+| **Mount Registry** | Mount configuration, policy enforcement, path resolution | `Mount`, `MountPolicy`, `MountName`, `GlobPolicy` |
+| **File System** | File I/O operations, directory traversal, atomic writes | `FileEntry`, `DirListing`, `FileContent`, `RelativePath` |
+| **Audit** | Operation recording, querying, retention | `AuditEvent`, `AuditEntry`, `AuditLog` |
+
+### 7.2 Aggregates
+
+**`Mount` (Mount Registry BC)**
+
+Root entity identified by `MountName`. Owns its policy as a value object. Invariants:
+
+- `root_path` must be an existing absolute directory at registration time
+- `name` must be unique across all mounts; alphanumeric + `-` + `_`, max 64 chars
+- `mode` is immutable after registration (`name` and `root_path` are also immutable — remove and re-add to change them)
+
+Key behavior:
+
+- `mount.policy.check_read(path)` — evaluates hide and deny-read globs
+- `mount.policy.check_write(path, size)` — evaluates deny-write globs and size limits
+- `mount.resolve(path: RelativePath) -> AbsolutePath` — joins root with validated relative path
+
+**`Token` (Access Control BC)**
+
+Root entity identified by `TokenId` (UUID v4 newtype). Owns its scopes as a `ScopeSet` value object. Raw token value is never stored — only the Argon2id hash.
+
+Key behavior:
+
+- `token.has_scope(required: &Scope) -> bool` — scope membership check
+- `token.is_expired() -> bool` — compares `expires_at` against current time
+- `token.verify(raw: &str) -> Result<()>` — Argon2id hash comparison, dispatched via `spawn_blocking`
+
+### 7.3 Value Objects
+
+Value objects are immutable and validated at construction. An invalid instance cannot exist.
+
+| Value Object | Validation enforced at construction | Location |
+|---|---|---|
+| `MountName` | Alphanumeric + `-` + `_`, max 64 chars, non-empty | `memo-core/mount.rs` |
+| `RelativePath` | No `..` components, no absolute prefix, no null bytes | `memo-core/path.rs` |
+| `MountPath` | Parses `MountName:/relative/path`; delegates to `MountName` and `RelativePath` | `memo-core/path.rs` |
+| `Scope` | Typed enum: `Fs { mount, action }` \| `Admin(_)` \| `Meta(_)` | `memo-core/scope.rs` |
+| `TokenId` | UUID v4 newtype | `memo-core/token.rs` |
+
+`RelativePath` and `MountPath` handle validation steps 1–4 of the path security model (parse mount prefix, reject absolute paths, reject `..` components — see Section 10). Steps 5–10 (canonicalize, symlink check, glob policy) remain in `PolicyEngine` because they require I/O or compiled glob state.
+
+### 7.4 Repository Interfaces
+
+Defined in `memo-core` (traits only, no I/O). SQLite implementations live in `memod`. This separation allows integration tests to inject in-memory stubs without SQLite.
+
+```rust
+#[async_trait]
+pub trait MountRepository: Send + Sync {
+    async fn find(&self, name: &MountName) -> Result<Mount, DbError>;
+    async fn list(&self) -> Result<Vec<Mount>, DbError>;
+    async fn save(&self, mount: &Mount) -> Result<(), DbError>;
+    async fn delete(&self, name: &MountName) -> Result<(), DbError>;
+}
+
+#[async_trait]
+pub trait TokenRepository: Send + Sync {
+    async fn find(&self, id: &TokenId) -> Result<Token, DbError>;
+    async fn verify(&self, raw_token: &str) -> Result<Token, AuthError>; // Argon2id verify
+    async fn list(&self) -> Result<Vec<TokenView>, DbError>;             // no raw hashes
+    async fn save(&self, token: &Token) -> Result<(), DbError>;
+    async fn delete(&self, id: &TokenId) -> Result<(), DbError>;
+    async fn touch_last_used(&self, id: &TokenId);                       // best-effort, non-blocking
+}
+```
+
+The `PolicyCache` (`DashMap<MountName, Arc<CompiledMount>>`) is an implementation detail of `SqliteMountRepository` — invisible to the domain.
+
+### 7.5 Application Services
+
+Application services coordinate domain objects and infrastructure. Each bounded context exposes one. They sit between HTTP handlers and the domain — handlers are thin HTTP adapters that extract parameters, call a service method, and serialize the response.
+
+| Service | Coordinates |
+|---------|-------------|
+| `FileSystemService` | token verify → mount policy check → fs op → emit domain event |
+| `MountService` | token verify (admin scope) → mount CRUD → cache invalidation |
+| `TokenService` | token verify (admin scope) → token CRUD |
+| `AuditService` | consumes domain events; appends to audit log; serves queries |
+
+### 7.6 Domain Events
+
+Domain events decouple operations from side effects. The Audit BC is the primary consumer in v1. The WebSocket audit tail (planned v2) adds a second consumer without changing the emitters.
+
+```rust
+pub enum DomainEvent {
+    FileRead     { token_id: TokenId, mount: MountName, path: RelativePath, bytes: u64 },
+    FileWritten  { token_id: TokenId, mount: MountName, path: RelativePath, bytes: u64 },
+    DirListed    { token_id: TokenId, mount: MountName, path: RelativePath },
+    MountRegistered { name: MountName, mode: MountMode },
+    MountUpdated    { name: MountName },
+    MountRemoved    { name: MountName },
+    TokenCreated    { id: TokenId, name: String },
+    TokenRevoked    { id: TokenId },
+    AccessDenied { token_id: Option<TokenId>, reason: DenialReason, mount: Option<MountName> },
+}
+```
+
+---
+
+## 8. Component Design
+
+### 8.1 memod (Daemon)
 
 Single async binary built on `tokio` + `axum`. Listens on TCP loopback (`127.0.0.1:18301` by default). All filesystem I/O runs inside this process.
 
@@ -176,29 +287,32 @@ On macOS, `memo daemon start` installs a launchd plist and loads it via `launchc
 `memo daemon stop` calls `launchctl unload` on the same plist.
 `memo daemon status` checks for the PID file at `$XDG_RUNTIME_DIR/memo/memod.pid` and calls `GET /health`.
 
-**Internal modules:**
+**Internal modules (organized by bounded context):**
 
 ```
 memod/src/
-├── main.rs          # startup, config loading, signal handling
-├── server.rs        # axum router, middleware, request tracing
-├── fs/
-│   ├── mod.rs       # FsService: core dispatch
-│   ├── ops.rs       # ls, stat, read, write, mkdir, mv, rm, cp
-│   ├── grep.rs      # text search (regex crate)
-│   ├── find.rs      # glob search (walkdir + globset)
-│   └── atomic.rs    # atomic write-by-rename (streaming AsyncRead, temp-file cleanup on error)
-├── policy/
-│   ├── mod.rs       # PolicyEngine; glob cache: DashMap<String, Arc<CompiledMount>>
-│   │                #   invalidated on mount create/update/delete
-│   └── path.rs      # resolve_read_path / resolve_write_path; path-clean normalization
-├── db/
-│   ├── mod.rs       # sqlx pool (SQLite WAL), migration runner
-│   ├── mounts.rs    # mount CRUD (invalidates glob cache on write)
-│   └── tokens.rs    # token CRUD; Argon2 verify via spawn_blocking
-├── audit.rs         # append JSON lines to ~/.local/state/memo/audit.log
-└── auth/
-    └── mod.rs       # token extraction, scope verification
+├── main.rs                     # startup sequence, config loading, signal handling
+├── server.rs                   # axum router, middleware, request tracing; handlers are thin adapters
+├── access_control/             # BC: token lifecycle and authentication decisions
+│   ├── mod.rs                  # TokenService (application service)
+│   ├── repository.rs           # SqliteTokenRepository: MountRepository impl
+│   └── middleware.rs           # Bearer token extraction (axum middleware)
+├── mount_registry/             # BC: mount configuration and policy enforcement
+│   ├── mod.rs                  # MountService (application service)
+│   ├── repository.rs           # SqliteMountRepository: MountRepository impl + PolicyCache
+│   └── policy.rs               # PolicyEngine (domain service): steps 5–10 of path validation
+│                               #   (canonicalize, symlink check, glob matching)
+├── filesystem/                 # BC: file I/O operations
+│   ├── mod.rs                  # FileSystemService (application service)
+│   ├── ops.rs                  # ls, stat, read, write, mkdir, mv, rm, cp
+│   ├── atomic.rs               # atomic write-by-rename (streaming AsyncRead, temp-file cleanup on error)
+│   ├── grep.rs                 # text search (regex crate)
+│   └── find.rs                 # glob filename search (walkdir + globset)
+├── audit/                      # BC: operation recording and querying
+│   ├── mod.rs                  # AuditService: domain event consumer + query handler
+│   └── log.rs                  # append-only JSON lines writer; AtomicU64 sequential id
+└── db/
+    └── mod.rs                  # sqlx pool (SQLite WAL), migration runner (shared infra)
 ```
 
 **Request lifecycle:**
@@ -263,7 +377,7 @@ where
 
 **Streaming reads:** For files above a configurable threshold (default: 4MB), reads are streamed using `axum::body::Body::from_stream`. Writes accept `axum::body::Bytes` streamed from request body.
 
-### 7.2 memo (CLI)
+### 8.2 memo (CLI)
 
 Thin client binary. Reads token from environment variable or config file. Sends REST HTTP/1.1 requests to the daemon via the shared `memo-client` crate, which uses `reqwest` with base URL `http://127.0.0.1:18301`.
 
@@ -280,7 +394,7 @@ memo/src/
     ├── mkdir.rs
     ├── mv.rs
     ├── rm.rs
-    ├── cp.rs        # local→mount: reads local file, calls write endpoint and also for mount→mount
+    ├── cp.rs        # local→mount: reads local file, calls write endpoint; also mount→mount
     ├── grep.rs
     ├── find.rs
     ├── info.rs
@@ -313,7 +427,7 @@ memo/src/
 --mount <name>      Default mount (reduces repetition)
 ```
 
-### 7.3 memo-ui (Tauri v2 Desktop Admin UI)
+### 8.3 memo-ui (Tauri v2 Desktop Admin UI)
 
 **Tauri v2** native macOS desktop application. The Rust backend (`src-tauri`) connects to `memod` via REST HTTP using the shared `memo-client` crate (`reqwest`-based). The frontend (HTML/CSS/JS rendered in the webview) communicates with the Rust backend via Tauri v2 `invoke` commands.
 
@@ -432,7 +546,7 @@ Admin operations (mount registration, token creation) require tokens with `admin
 
 ---
 
-## 8. IPC Protocol
+## 9. IPC Protocol
 
 **Transport:** REST HTTP/1.1 over TCP loopback.
 
@@ -495,9 +609,9 @@ Not in v1 scope, but the REST-over-TCP foundation makes WebSocket a natural addi
 
 ---
 
-## 9. Path Validation & Security
+## 10. Path Validation & Security
 
-Path validation is the most security-critical component. It runs before any filesystem syscall. All logic is in `policy/path.rs`.
+Path validation is the most security-critical component. It runs before any filesystem syscall. Steps 1–4 are enforced by value object constructors (`RelativePath`, `MountPath`) in `memo-core/path.rs`. Steps 5–10 require I/O or compiled glob state and live in `memod/mount_registry/policy.rs` (`PolicyEngine`).
 
 **Validation steps (in order):**
 
@@ -561,7 +675,7 @@ if !canonical.starts_with(&mount.root_path_canonical) {
 
 ---
 
-## 10. Data Model (SQLite)
+## 11. Data Model (SQLite)
 
 Database location: `~/.local/share/memo/memo.db` (overridable via config).
 
@@ -610,13 +724,13 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 
 ---
 
-## 11. API Reference
+## 12. API Reference
 
 Base URL: `http://127.0.0.1:18301`
 
 All requests require `Authorization: Bearer <token>`.
 
-### 11.1 Filesystem Endpoints
+### 12.1 Filesystem Endpoints
 
 #### `GET /v1/fs/ls`
 
@@ -845,7 +959,7 @@ Glob-based filename search.
 
 ---
 
-### 11.2 Meta Endpoints
+### 12.2 Meta Endpoints
 
 Meta endpoints require tokens with `admin:*` or `meta:read` scopes.
 
@@ -1037,7 +1151,7 @@ When `after` or `after_id` is provided, entries are returned in **ascending** (o
 }
 ```
 
-### 11.3 Utility Endpoints
+### 12.3 Utility Endpoints
 
 #### `GET /health`
 
@@ -1051,7 +1165,7 @@ No auth required. Used by `memo daemon status` to verify the daemon is reachable
 
 ---
 
-## 12. Token & Auth Model
+## 13. Token & Auth Model
 
 ### Token Format
 
@@ -1112,7 +1226,7 @@ The operator reads the file, stores the token securely, and uses it to provision
 
 ---
 
-## 13. Error Model
+## 14. Error Model
 
 **Error type implementation** uses `thiserror`. `memo-core` defines:
 
@@ -1181,7 +1295,7 @@ Structured error (JSON mode):
 
 ---
 
-## 14. CLI Reference
+## 15. CLI Reference
 
 Global flags apply to all commands:
 
@@ -1261,7 +1375,7 @@ memo daemon logs --tail 50
 
 ---
 
-## 15. Mount Configuration Schema
+## 16. Mount Configuration Schema
 
 Mounts are stored in SQLite (not in config files). Registration happens via `memo mount add` or `POST /v1/meta/mounts`.
 
@@ -1335,7 +1449,7 @@ max_audit_log_rows = 100000   # entries before rotation (background task on star
 
 ---
 
-## 16. Observability & Audit
+## 17. Observability & Audit
 
 ### Audit Log
 
@@ -1376,7 +1490,7 @@ Format (JSON):
 
 ---
 
-## 17. Repository Layout
+## 18. Repository Layout
 
 ```
 memo/
@@ -1386,24 +1500,27 @@ memo/
 │   ├── memod/              # daemon binary
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   │       ├── main.rs     # startup, config, signal handlers
-│   │       ├── server.rs   # axum router, middleware, request tracing
-│   │       ├── fs/
-│   │       │   ├── mod.rs  # FsService
-│   │       │   ├── ops.rs  # ls, stat, read, write, mkdir, mv, rm, cp
-│   │       │   ├── grep.rs # text search (regex crate)
-│   │       │   ├── find.rs # glob search (walkdir + globset)
-│   │       │   └── atomic.rs # atomic write-by-rename (streaming AsyncRead)
-│   │       ├── policy/
-│   │       │   ├── mod.rs  # PolicyEngine; DashMap glob cache
-│   │       │   └── path.rs # resolve_read_path / resolve_write_path; path-clean
-│   │       ├── db/
-│   │       │   ├── mod.rs  # sqlx pool (SQLite WAL), migrations
-│   │       │   ├── mounts.rs
-│   │       │   └── tokens.rs # Argon2 verify via spawn_blocking
-│   │       ├── audit.rs    # append JSON lines to ~/.local/state/memo/audit.log
-│   │       └── auth/
-│   │           └── mod.rs  # token extraction + scope verification
+│   │       ├── main.rs                 # startup, config, signal handlers
+│   │       ├── server.rs               # axum router, middleware; handlers are thin adapters
+│   │       ├── access_control/         # BC: token lifecycle and auth
+│   │       │   ├── mod.rs              # TokenService (application service)
+│   │       │   ├── repository.rs       # SqliteTokenRepository impl
+│   │       │   └── middleware.rs       # Bearer token extraction (axum middleware)
+│   │       ├── mount_registry/         # BC: mount config and policy
+│   │       │   ├── mod.rs              # MountService (application service)
+│   │       │   ├── repository.rs       # SqliteMountRepository impl + PolicyCache
+│   │       │   └── policy.rs           # PolicyEngine: path validation steps 5–10
+│   │       ├── filesystem/             # BC: file I/O
+│   │       │   ├── mod.rs              # FileSystemService (application service)
+│   │       │   ├── ops.rs              # ls, stat, read, write, mkdir, mv, rm, cp
+│   │       │   ├── atomic.rs           # atomic write-by-rename (streaming AsyncRead)
+│   │       │   ├── grep.rs             # text search (regex crate)
+│   │       │   └── find.rs             # glob search (walkdir + globset)
+│   │       ├── audit/                  # BC: operation recording
+│   │       │   ├── mod.rs              # AuditService: event consumer + query handler
+│   │       │   └── log.rs              # append-only JSON lines; AtomicU64 sequential id
+│   │       └── db/
+│   │           └── mod.rs              # sqlx pool (SQLite WAL), migrations
 │   ├── memo/               # CLI binary
 │   │   ├── Cargo.toml
 │   │   └── src/
@@ -1416,7 +1533,7 @@ memo/
 │   │           ├── mkdir.rs
 │   │           ├── mv.rs
 │   │           ├── rm.rs
-│   │           ├── cp.rs   # local→mount: reads local file, calls write endpoint ad for mount→mount
+│   │           ├── cp.rs   # local→mount: reads local file, calls write endpoint; also mount→mount
 │   │           ├── grep.rs
 │   │           ├── find.rs
 │   │           ├── info.rs
@@ -1453,13 +1570,17 @@ memo/
 │   │   ├── package.json
 │   │   ├── tsconfig.json
 │   │   └── vite.config.ts
-│   └── memo-core/          # shared types, protocol structs, error types
+│   └── memo-core/          # shared domain model; no I/O
 │       ├── Cargo.toml
 │       └── src/
 │           ├── lib.rs
-│           ├── types.rs    # Mount, Token, AuditEntry, DirEntry structs
-│           ├── errors.rs   # ApiError, PolicyError, DbError (thiserror)
-│           └── scopes.rs   # scope parsing + checking
+│           ├── mount.rs        # Mount aggregate, MountPolicy, MountName value object
+│           ├── token.rs        # Token aggregate, TokenId, ScopeSet
+│           ├── path.rs         # MountPath, RelativePath value objects (validation at construction)
+│           ├── scope.rs        # Scope enum, scope parsing + checking
+│           ├── events.rs       # DomainEvent enum
+│           ├── errors.rs       # ApiError, PolicyError, DbError (thiserror)
+│           └── repositories.rs # MountRepository, TokenRepository traits (no impl)
 ├── docs/
 │   ├── vision.md
 │   └── system-design-v1.md
@@ -1522,7 +1643,7 @@ tauri-plugin-store = "2"                             # token storage for memo-ui
 
 ---
 
-## 18. Testing Strategy
+## 19. Testing Strategy
 
 ### Unit Tests
 
@@ -1595,7 +1716,7 @@ Run as part of integration suite, tagged `#[test] #[ignore = "security"]` and en
 
 ---
 
-## 19. Open Questions
+## 20. Open Questions
 
 1. ~~**`memo-ui` transport**~~ — **Resolved:** `memo-ui` connects to `memod` via REST HTTP on `127.0.0.1:18301` using the shared `memo-client` crate.
 

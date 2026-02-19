@@ -245,7 +245,7 @@ Decision records capture the reasoning behind significant choices at the time th
 - Keep each record small and focused on a single decision
 - Use `dr-` prefix for file names: `dr-0001-use-postgresql.md`
 - Maintain a single index file (`README.md`) that lists all records with their status
-- Add a note at the top: _"Decision records capture decisions at the time they were made. For current behavior, see `docs/architecture/` and the code."_
+- Add a note at the top: _"Decision records capture decisions at the time they were made. For current behavior, see `docs/architecture` and the code."_
 
 ---
 
@@ -267,8 +267,8 @@ The `archive/` directory holds documents that are no longer actively maintained 
 | Directory | Purpose | Truth type |
 |-----------|---------|------------|
 | `docs/README.md` | Entry point: project overview, docs map, links | — |
-| `overview/` | Problem space, goals, non-goals, glossary | Vision truth |
-| `architecture/` | System context, high-level design, data flow, deployment | System truth |
+| `overview` | Problem space, goals, non-goals, glossary | Vision truth |
+| `architecture` | System context, high-level design, data flow, deployment | System truth |
 | `design/` | Per bounded context: responsibilities, flows, decisions (closer to implementation, less abstract) | Domain truth |
 | `decision-records/` | Numbered records of significant choices with status tracking | Historical truth |
 | `development/` | Local setup, coding guidelines, testing strategy | Procedural truth |
@@ -283,18 +283,9 @@ Example:
 docs/
 ├── README.md                  # Entry point: project overview, docs map, link to this file
 │
-├── overview/                  # Problem space and goals (for now not needed, README is ok)
-│   ├── problem.md
-│   ├── goals.md
-│   ├── non-goals.md
-│   └── glossary.md
+├── overview.md                  # Problem space and goals (for now not needed, README is ok)
 │
-├── architecture/              # System-level truth (in this project architecture.md is enough)
-│   ├── README.md
-│   ├── system-context.md
-│   ├── high-level-design.md
-│   ├── data-flow.md
-│   └── deployment.md
+├── architecture.md              # System-level truth (in this project architecture.md is enough)
 │
 ├── design/                    # Domain-level truth (per bounded context), closer to implementation, less abstract
 │   ├── README.md
@@ -327,3 +318,5 @@ docs/
 └── archive/                   # Deprecated or superseded documents
     └── ...
 ```
+
+
