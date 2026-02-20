@@ -348,7 +348,7 @@ graph TD
 - Signal handlers: `SIGTERM`/`SIGINT` → graceful shutdown (finish in-flight requests, close DB pool, remove PID file)
 - XDG directory creation: ensure `~/.config/memo/`, `~/.local/share/memo/`, `~/.local/state/memo/` exist
 - Structured logging: `tracing` + `tracing-subscriber` with JSON output to log file + stderr
-- `GET /health` endpoint (no auth): `{"status": "ok", "version": "0.1.0"}`
+- `GET /health` endpoint (no auth): `{"status": "ok", "version": "1.0.0-alpha"}`
 - Full axum router assembly: mount all BC handlers, apply auth middleware, request tracing
 
 **Depends on:** A4 (all BC implementations needed for router assembly)

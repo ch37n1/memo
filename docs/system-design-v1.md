@@ -1177,7 +1177,7 @@ No auth required. Used by `memo daemon status` to verify the daemon is reachable
 **Response `200`:**
 
 ```json
-{"status": "ok", "version": "0.1.0"}
+{"status": "ok", "version": "1.0.0-alpha"}
 ```
 
 ---
